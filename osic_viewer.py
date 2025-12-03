@@ -17,7 +17,7 @@ class OSICViewer:
         self.n_joints = 7
         self.joint_names = [f"panda_joint{i+1}" for i in range(self.n_joints)]
         
-        # 初始配置
+        # 初始配置（原始）
         qpos0 = np.array([0, -0.785, 0, -2.356, 0, 1.571, 0.785])
         for i, name in enumerate(self.joint_names):
             dof = self.model.joint(name).dofadr
@@ -29,6 +29,8 @@ class OSICViewer:
         self.contact_t = None
         self.F_integral = 0.0
         self.t_start = None
+        self.is_contact_stable = False  # 稳定的接触状态（带滞后）
+        self.is_contact_ever_established = False  # 一旦接触过，不再断开
     
     def get_jacobian_3x7(self):
         jacp = np.zeros((3, self.model.nv))
@@ -51,7 +53,7 @@ class OSICViewer:
     
     def get_contact_force(self):
         force_z = 0.0
-        is_contact = False
+        is_contact_now = False
         
         try:
             surf_geom_id = self.model.geom("surface").id
@@ -64,12 +66,21 @@ class OSICViewer:
                 f = np.zeros(6)
                 mujoco.mj_contactForce(self.model, self.data, i, f)
                 force_z += f[2]
-                if f[2] > 0.5:
-                    is_contact = True
+                # 使用绝对值判断接触
+                if abs(f[2]) > 0.1:  # 任何小于0.1的力都忽略
+                    is_contact_now = True
         
-        return is_contact, force_z
+        # 改进的滞后机制：一旦有显著接触力，就保持接触状态
+        # 只有当力完全消失时才切换为未接触
+        if abs(force_z) > 1.0:  # 有显著力
+            self.is_contact_stable = True
+        elif abs(force_z) < 0.05:  # 力完全消失
+            self.is_contact_stable = False
+        # 其他情况（0.05-1.0之间）保持现有状态
+        
+        return self.is_contact_stable, force_z
     
-    def control_step(self, t, F_target=10.0, dt=0.002):
+    def control_step(self, t, F_target=-3.5, dt=0.002):  # 目标压力应该是负数（向下）
         """执行一步控制"""
         
         mujoco.mj_forward(self.model, self.data)
@@ -86,16 +97,17 @@ class OSICViewer:
         is_contact, F_curr = self.get_contact_force()
         
         # ========== 阶段识别 ==========
-        if not is_contact:
+        # 基于接触力检测
+        if abs(F_curr) < 1.0:  # 没有显著接触力
             phase = 0
-            if self.contact_t is None:
-                pass
-            else:
-                self.contact_t = None
         else:
+            # 有显著接触力
+            # 第一次有接触力时记录时间，之后永不改变
             if self.contact_t is None:
                 self.contact_t = t
+                self.is_contact_ever_established = True
             
+            # Phase按照接触后的时间递进
             t_since_contact = t - self.contact_t
             if t_since_contact < 1.0:
                 phase = 1
@@ -108,49 +120,69 @@ class OSICViewer:
         F_cmd = np.zeros(3)
         
         if phase == 0:
-            z_des = 0.4 - min(t / 15.0, 1.0) * (0.4 - 0.315)
-            F_cmd[2] = 100.0 * (z_des - pos_curr[2]) - 5.0 * v_curr[2]
+            # Phase 0: 快速下降到接近表面
+            # 每秒下降0.2m，需要3秒从0.4m到表面0.15m左右
+            z_des = 0.4 - min(t / 3.0, 1.0) * 0.25  # 从0.4降到0.15
+            # 中等增益（不要太高导致不稳定）
+            F_cmd[2] = 300.0 * (z_des - pos_curr[2]) - 20.0 * v_curr[2]
         
         elif phase == 1:
-            F_cmd[2] = 150.0 * (pos_curr[2] - pos_curr[2]) - 4.0 * v_curr[2] + 20.0
+            # Phase 1: 继续缓慢下降并产生压力
+            z_des = max(0.15 - 0.01 * (t - self.contact_t), 0.1)  # 从0.15缓慢降到0.1
+            F_cmd[2] = 250.0 * (z_des - pos_curr[2]) - 15.0 * v_curr[2] + 30.0  # 压力30N
         
         elif phase == 2:
-            z_des = 0.315 - 0.010 * ((t - self.contact_t - 1.0) / 2.0)
-            F_cmd[2] = 40.0 * (z_des - pos_curr[2]) - 3.0 * v_curr[2]
+            # Phase 2: 保持位置并产生稳定压力
+            z_des = 0.12
+            F_cmd[2] = 200.0 * (z_des - pos_curr[2]) - 10.0 * v_curr[2] + 40.0  # 压力40N
         
         elif phase == 3:
-            F_err = F_target - F_curr
-            self.F_integral = np.clip(self.F_integral + F_err * dt, -1.0, 1.0)
-            F_cmd[2] = -12.0 * F_err - 0.3 * self.F_integral - 2.0 * v_curr[2]
-            F_cmd[2] += 2.0 * (0.313 - pos_curr[2])
+            # Phase 3: 维持接触，不再改变Z轴
+            z_des = 0.24  # 锁定在当前接触深度
+            F_cmd[2] = 150.0 * (z_des - pos_curr[2]) - 5.0 * v_curr[2]  # 弱力维持位置
         
         # XY轴跟踪
         pos_ref_xy = np.array([0.5, 0.0])
+        vel_ref_xy = np.array([0.0, 0.0])  # 切向速度参考
         
         # 切向运动
         if is_contact and self.contact_t is not None:
             t_contact = t - self.contact_t
             if t_contact >= 3.0:
-                # 前后擦拭
-                if t_contact < 20.0:
-                    wipe_t = (t_contact - 3.0) % 10.0
-                    if wipe_t < 5.0:
-                        pos_ref_xy[0] += 0.08 * np.sin((wipe_t / 5.0) * np.pi)
+                # 稳定接触5秒后再开始擦拭
+                t_wipe = t_contact - 3.0 - 5.0
+                
+                if t_wipe >= 0:  # 过渡完成后
+                    # 前后擦拭（X轴）：15秒，增加幅度到0.15m
+                    if t_wipe < 15.0:
+                        cycle_t = t_wipe % 1.0  # 1秒一个周期
+                        if cycle_t < 0.5:
+                            progress = cycle_t / 0.5
+                            pos_ref_xy[0] = 0.5 + 0.15 * np.sin(progress * np.pi)  # 幅度从0.12→0.15
+                            vel_ref_xy[0] = 0.15 * np.pi / 0.5 * np.cos(progress * np.pi)  # 速度前馈
+                        else:
+                            progress = (cycle_t - 0.5) / 0.5
+                            pos_ref_xy[0] = 0.5 + 0.15 * np.sin((1.0 - progress) * np.pi)
+                            vel_ref_xy[0] = -0.15 * np.pi / 0.5 * np.cos((1.0 - progress) * np.pi)
+                    
+                    # 左右擦拭（Y轴）：从15秒后开始，幅度0.1m
                     else:
-                        pos_ref_xy[0] += 0.08 * np.sin((1.0 - (wipe_t - 5.0) / 5.0) * np.pi)
-                # 左右擦拭
-                elif t_contact < 40.0:
-                    wipe_t = (t_contact - 20.0) % 10.0
-                    if wipe_t < 5.0:
-                        pos_ref_xy[1] -= 0.08 * np.sin((wipe_t / 5.0) * np.pi)
-                    else:
-                        pos_ref_xy[1] -= 0.08 * np.sin((1.0 - (wipe_t - 5.0) / 5.0) * np.pi)
+                        cycle_t = (t_wipe - 15.0) % 1.0
+                        if cycle_t < 0.5:
+                            progress = cycle_t / 0.5
+                            pos_ref_xy[1] = 0.0 - 0.1 * np.sin(progress * np.pi)  # 幅度从0.08→0.1
+                            vel_ref_xy[1] = -0.1 * np.pi / 0.5 * np.cos(progress * np.pi)
+                        else:
+                            progress = (cycle_t - 0.5) / 0.5
+                            pos_ref_xy[1] = 0.0 - 0.1 * np.sin((1.0 - progress) * np.pi)
+                            vel_ref_xy[1] = 0.1 * np.pi / 0.5 * np.cos((1.0 - progress) * np.pi)
         
         err_xy = pos_ref_xy - pos_curr[:2]
-        if is_contact and F_curr > 1.0:
-            F_cmd[:2] = 25.0 * err_xy - 5.0 * v_curr[:2]
+        if is_contact and abs(F_curr) > 2.0:  # 接触时使用速度前馈
+            # 位置反馈 + 速度前馈
+            F_cmd[:2] = 800.0 * err_xy + 2.0 * vel_ref_xy - 3.0 * v_curr[:2]
         else:
-            F_cmd[:2] = 40.0 * err_xy - 8.0 * v_curr[:2]
+            F_cmd[:2] = 200.0 * err_xy - 15.0 * v_curr[:2]
         
         # ========== 转换为关节力矩 ==========
         tau = np.zeros(self.n_joints)
