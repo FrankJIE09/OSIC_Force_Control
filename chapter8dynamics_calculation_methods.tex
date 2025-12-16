@@ -1,0 +1,476 @@
+\documentclass{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\geometry{a4paper, margin=2.5cm}
+
+\title{机器人动力学量的计算方法：$M(\theta)$、$h(\theta, \dot{\theta})$、$\Lambda(\theta)$和$\eta(\theta, V)$}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{概述}
+
+本文档详细说明机器人动力学中四个关键量的计算方法：
+\begin{enumerate}
+\item $M(\theta)$：关节空间质量矩阵
+\item $h(\theta, \dot{\theta})$：科里奥利力、向心力和重力项
+\item $\Lambda(\theta)$：任务空间质量矩阵
+\item $\eta(\theta, V)$：任务空间科里奥利力、向心力和重力项
+\end{enumerate}
+
+\section{关节空间质量矩阵$M(\theta)$的计算}
+
+\subsection{基本定义}
+
+质量矩阵$M(\theta) \in \mathbb{R}^{n \times n}$是一个对称正定矩阵，描述了关节加速度$\ddot{\theta}$与关节力矩$\tau$之间的关系。在动力学方程中：
+\begin{equation}
+\tau = M(\theta)\ddot{\theta} + h(\theta, \dot{\theta})
+\end{equation}
+
+\subsection{计算方法1：拉格朗日方法}
+
+\subsubsection{基本原理}
+
+拉格朗日方法通过系统的动能和势能来推导动力学方程。
+
+\textbf{步骤}：
+
+\begin{enumerate}
+\item \textbf{计算系统动能}：
+\begin{equation}
+T = \frac{1}{2}\sum_{i=1}^{n}\sum_{j=1}^{n} M_{ij}(\theta)\dot{\theta}_i\dot{\theta}_j = \frac{1}{2}\dot{\theta}^T M(\theta)\dot{\theta}
+\end{equation}
+
+\item \textbf{从动能提取质量矩阵}：
+质量矩阵的元素可以通过动能的二阶偏导数得到：
+\begin{equation}
+M_{ij}(\theta) = \frac{\partial^2 T}{\partial \dot{\theta}_i \partial \dot{\theta}_j}
+\end{equation}
+
+\item \textbf{具体计算过程}：
+\begin{itemize}
+\item 对于每个连杆$i$，计算其动能：
+\begin{equation}
+T_i = \frac{1}{2}m_i v_{c,i}^T v_{c,i} + \frac{1}{2}\omega_i^T I_i \omega_i
+\end{equation}
+其中：
+\begin{itemize}
+\item $m_i$：连杆$i$的质量
+\item $v_{c,i}$：连杆$i$质心的线速度
+\item $\omega_i$：连杆$i$的角速度
+\item $I_i$：连杆$i$在质心处的惯性张量
+\end{itemize}
+
+\item 总动能为所有连杆动能之和：
+\begin{equation}
+T = \sum_{i=1}^{n} T_i
+\end{equation}
+
+\item 将速度$v_{c,i}$和$\omega_i$表示为关节速度$\dot{\theta}$的函数：
+\begin{align}
+v_{c,i} &= J_{v,i}(\theta)\dot{\theta} \\
+\omega_i &= J_{\omega,i}(\theta)\dot{\theta}
+\end{align}
+其中$J_{v,i}$和$J_{\omega,i}$分别是连杆$i$质心的线速度和角速度雅可比矩阵。
+
+\item 代入动能表达式：
+\begin{align}
+T_i &= \frac{1}{2}m_i (J_{v,i}\dot{\theta})^T (J_{v,i}\dot{\theta}) + \frac{1}{2}(J_{\omega,i}\dot{\theta})^T I_i (J_{\omega,i}\dot{\theta}) \\
+    &= \frac{1}{2}\dot{\theta}^T [m_i J_{v,i}^T J_{v,i} + J_{\omega,i}^T I_i J_{\omega,i}]\dot{\theta}
+\end{align}
+
+\item 质量矩阵为：
+\begin{equation}
+M(\theta) = \sum_{i=1}^{n} [m_i J_{v,i}^T(\theta) J_{v,i}(\theta) + J_{\omega,i}^T(\theta) I_i J_{\omega,i}(\theta)]
+\end{equation}
+\end{itemize}
+\end{enumerate}
+
+\subsubsection{计算复杂度}
+
+\begin{itemize}
+\item 需要计算每个连杆的雅可比矩阵$J_{v,i}$和$J_{\omega,i}$
+\item 对于$n$关节机器人，需要计算$n$个$3 \times n$矩阵（线速度）和$n$个$3 \times n$矩阵（角速度）
+\item 总计算复杂度：$O(n^3)$
+\end{itemize}
+
+\subsection{计算方法2：递归牛顿-欧拉方法（推荐）}
+
+递归牛顿-欧拉方法是一种更高效的计算方法，特别适合实时控制。
+
+\subsubsection{前向递推（Forward Recursion）}
+
+从基座到末端，计算每个连杆的速度和加速度：
+
+\begin{enumerate}
+\item \textbf{初始化}（基座）：
+\begin{align}
+\omega_0 &= 0 \\
+\dot{\omega}_0 &= 0 \\
+v_0 &= 0 \\
+\dot{v}_0 &= g \quad \text{（重力加速度）}
+\end{align}
+
+\item \textbf{对于每个关节$i = 1, \ldots, n$}：
+\begin{itemize}
+\item 如果关节$i$是旋转关节：
+\begin{align}
+\omega_i &= R_i^T \omega_{i-1} + \dot{\theta}_i z_i \\
+\dot{\omega}_i &= R_i^T \dot{\omega}_{i-1} + R_i^T \omega_{i-1} \times \dot{\theta}_i z_i + \ddot{\theta}_i z_i \\
+v_i &= R_i^T (v_{i-1} + \omega_{i-1} \times p_i) \\
+\dot{v}_i &= R_i^T (\dot{v}_{i-1} + \dot{\omega}_{i-1} \times p_i + \omega_{i-1} \times (\omega_{i-1} \times p_i))
+\end{align}
+
+\item 如果关节$i$是移动关节：
+\begin{align}
+\omega_i &= R_i^T \omega_{i-1} \\
+\dot{\omega}_i &= R_i^T \dot{\omega}_{i-1} \\
+v_i &= R_i^T (v_{i-1} + \omega_{i-1} \times p_i) + \dot{d}_i z_i \\
+\dot{v}_i &= R_i^T (\dot{v}_{i-1} + \dot{\omega}_{i-1} \times p_i + \omega_{i-1} \times (\omega_{i-1} \times p_i)) + 2\omega_i \times \dot{d}_i z_i + \ddot{d}_i z_i
+\end{align}
+
+\item 计算质心加速度：
+\begin{align}
+\dot{v}_{c,i} &= \dot{v}_i + \dot{\omega}_i \times r_i + \omega_i \times (\omega_i \times r_i)
+\end{align}
+其中$r_i$是从关节$i$到连杆$i$质心的向量。
+\end{itemize}
+\end{enumerate}
+
+\subsubsection{后向递推（Backward Recursion）}
+
+从末端到基座，计算每个连杆的力和力矩：
+
+\begin{enumerate}
+\item \textbf{初始化}（末端）：
+\begin{equation}
+f_{n+1} = 0, \quad \mu_{n+1} = 0
+\end{equation}
+
+\item \textbf{对于每个关节$i = n, n-1, \ldots, 1$}：
+\begin{align}
+f_i &= R_{i+1} f_{i+1} + m_i \dot{v}_{c,i} \\
+\mu_i &= R_{i+1} \mu_{i+1} + r_i \times f_i + I_i \dot{\omega}_i + \omega_i \times (I_i \omega_i)
+\end{align}
+
+\item \textbf{计算关节力矩}：
+\begin{itemize}
+\item 如果关节$i$是旋转关节：
+\begin{equation}
+\tau_i = \mu_i^T z_i
+\end{equation}
+
+\item 如果关节$i$是移动关节：
+\begin{equation}
+\tau_i = f_i^T z_i
+\end{equation}
+\end{itemize}
+\end{enumerate}
+
+\subsubsection{质量矩阵的计算}
+
+为了计算质量矩阵$M(\theta)$，需要对每个关节$j$，设置$\ddot{\theta}_j = 1$，其他$\ddot{\theta}_k = 0$（$k \neq j$），并设置所有$\dot{\theta}_k = 0$和重力$g = 0$，然后运行递归算法。得到的$\tau_i$就是$M_{ij}(\theta)$。
+
+\textbf{算法}：
+\begin{enumerate}
+\item 对于$j = 1, \ldots, n$：
+\begin{itemize}
+\item 设置$\ddot{\theta}_j = 1$，$\ddot{\theta}_k = 0$（$k \neq j$）
+\item 设置所有$\dot{\theta}_k = 0$
+\item 设置$g = 0$（忽略重力）
+\item 运行递归牛顿-欧拉算法
+\item $M_{ij}(\theta) = \tau_i$（对于所有$i$）
+\end{itemize}
+\end{enumerate}
+
+\subsubsection{计算复杂度}
+
+\begin{itemize}
+\item 对于每个$j$，递归算法需要$O(n)$时间
+\item 总共需要$n$次递归，总复杂度：$O(n^2)$
+\item 比拉格朗日方法更高效
+\end{itemize}
+
+\section{科里奥利力、向心力和重力项$h(\theta, \dot{\theta})$的计算}
+
+\subsection{基本定义}
+
+$h(\theta, \dot{\theta})$包含三项：
+\begin{equation}
+h(\theta, \dot{\theta}) = C(\theta, \dot{\theta})\dot{\theta} + g(\theta) + b(\dot{\theta})
+\end{equation}
+其中：
+\begin{itemize}
+\item $C(\theta, \dot{\theta})\dot{\theta}$：科里奥利力和向心力项
+\item $g(\theta)$：重力项
+\item $b(\dot{\theta})$：摩擦项（可选）
+\end{itemize}
+
+\subsection{计算方法1：从拉格朗日方程}
+
+从拉格朗日方程：
+\begin{equation}
+\frac{d}{dt}\frac{\partial L}{\partial \dot{\theta}} - \frac{\partial L}{\partial \theta} = \tau
+\end{equation}
+其中$L = T - U$是拉格朗日量，$T$是动能，$U$是势能。
+
+展开后得到：
+\begin{equation}
+M(\theta)\ddot{\theta} + \dot{M}(\theta)\dot{\theta} - \frac{1}{2}\frac{\partial}{\partial \theta}[\dot{\theta}^T M(\theta)\dot{\theta}] + \frac{\partial U}{\partial \theta} = \tau
+\end{equation}
+
+因此：
+\begin{align}
+C(\theta, \dot{\theta})\dot{\theta} &= \dot{M}(\theta)\dot{\theta} - \frac{1}{2}\frac{\partial}{\partial \theta}[\dot{\theta}^T M(\theta)\dot{\theta}] \\
+g(\theta) &= \frac{\partial U}{\partial \theta}
+\end{align}
+
+\subsection{计算方法2：递归牛顿-欧拉方法（推荐）}
+
+\subsubsection{重力项$g(\theta)$的计算}
+
+\begin{enumerate}
+\item 设置所有$\dot{\theta}_i = 0$和$\ddot{\theta}_i = 0$
+\item 运行递归牛顿-欧拉算法（包含重力$g$）
+\item 得到的$\tau_i$就是$g_i(\theta)$
+\end{enumerate}
+
+\subsubsection{科里奥利项$C(\theta, \dot{\theta})\dot{\theta}$的计算}
+
+\begin{enumerate}
+\item 设置重力$g = 0$
+\item 使用给定的$\theta$和$\dot{\theta}$运行递归牛顿-欧拉算法
+\item 计算$\tau_{\text{total}} = M(\theta)\ddot{\theta} + C(\theta, \dot{\theta})\dot{\theta} + g(\theta)$
+\item 由于$\ddot{\theta} = 0$（在计算$h$时），且$g(\theta)$已单独计算，因此：
+\begin{equation}
+C(\theta, \dot{\theta})\dot{\theta} = \tau_{\text{total}} - g(\theta)
+\end{equation}
+\end{enumerate}
+
+\subsubsection{完整算法}
+
+\textbf{计算$h(\theta, \dot{\theta})$}：
+\begin{enumerate}
+\item \textbf{计算重力项}：
+\begin{itemize}
+\item 设置$\dot{\theta} = 0$，$\ddot{\theta} = 0$
+\item 运行递归算法（包含重力）
+\item $g(\theta) = \tau$
+\end{itemize}
+
+\item \textbf{计算科里奥利项}：
+\begin{itemize}
+\item 设置$\ddot{\theta} = 0$，$g = 0$
+\item 使用给定的$\dot{\theta}$运行递归算法
+\item $C(\theta, \dot{\theta})\dot{\theta} = \tau - g(\theta)$
+\end{itemize}
+
+\item \textbf{组合}：
+\begin{equation}
+h(\theta, \dot{\theta}) = C(\theta, \dot{\theta})\dot{\theta} + g(\theta)
+\end{equation}
+\end{enumerate}
+
+\section{任务空间质量矩阵$\Lambda(\theta)$的计算}
+
+\subsection{基本定义}
+
+任务空间质量矩阵定义为：
+\begin{equation}
+\Lambda(\theta) = J^{-T}(\theta)M(\theta)J^{-1}(\theta) \tag{8.90}
+\end{equation}
+其中$J(\theta)$是雅可比矩阵（可以是空间雅可比$J_s$或体雅可比$J_b$）。
+
+\subsection{计算方法}
+
+\subsubsection{方法1：直接计算（当$J$可逆时）}
+
+\begin{enumerate}
+\item 计算关节空间质量矩阵$M(\theta)$（使用前面介绍的方法）
+\item 计算雅可比矩阵$J(\theta)$
+\item 计算$J^{-1}(\theta)$（如果$J$可逆）
+\item 计算：
+\begin{equation}
+\Lambda(\theta) = J^{-T}(\theta)M(\theta)J^{-1}(\theta)
+\end{equation}
+\end{enumerate}
+
+\textbf{注意}：
+\begin{itemize}
+\item 需要$J(\theta)$可逆，即机器人不在奇异点
+\item 对于6自由度机器人，$\Lambda(\theta)$是$6 \times 6$矩阵
+\item 计算复杂度：$O(n^3)$（主要是矩阵求逆和乘法）
+\end{itemize}
+
+\subsubsection{方法2：使用伪逆（当$J$不可逆或冗余机器人时）}
+
+对于冗余机器人（$n > 6$）或接近奇异点的情况，使用伪逆：
+\begin{equation}
+\Lambda(\theta) = (J^{\dagger})^T M(\theta) J^{\dagger}
+\end{equation}
+其中$J^{\dagger} = (J^T J)^{-1}J^T$是伪逆。
+
+\subsubsection{方法3：避免求逆（数值稳定）}
+
+为了避免直接求逆，可以使用：
+\begin{equation}
+\Lambda(\theta) = (J M^{-1} J^T)^{-1}
+\end{equation}
+
+\textbf{验证}：
+\begin{align}
+(J M^{-1} J^T)^{-1} &= (J^T)^{-1} M (J^{-1}) \\
+                    &= J^{-T} M J^{-1} = \Lambda(\theta)
+\end{align}
+
+\textbf{优点}：
+\begin{itemize}
+\item 只需要计算$M^{-1}$（如果$M$是对角或稀疏的，这很容易）
+\item 数值上更稳定
+\end{itemize}
+
+\section{任务空间科里奥利项$\eta(\theta, V)$的计算}
+
+\subsection{基本定义}
+
+任务空间科里奥利项定义为：
+\begin{equation}
+\eta(\theta, V) = J^{-T}(\theta)h(\theta, J^{-1}V) - \Lambda(\theta)\dot{J}(\theta)J^{-1}(\theta)V \tag{8.91}
+\end{equation}
+
+\subsection{计算方法}
+
+\subsubsection{步骤1：计算关节速度}
+
+从任务空间速度$V$计算关节速度：
+\begin{equation}
+\dot{\theta} = J^{-1}(\theta)V
+\end{equation}
+
+\subsubsection{步骤2：计算$h(\theta, \dot{\theta})$}
+
+使用前面介绍的方法计算：
+\begin{equation}
+h(\theta, \dot{\theta}) = h(\theta, J^{-1}V)
+\end{equation}
+
+\subsubsection{步骤3：计算雅可比矩阵的时间导数$\dot{J}(\theta)$}
+
+雅可比矩阵的时间导数为：
+\begin{equation}
+\dot{J}(\theta) = \frac{d}{dt}J(\theta) = \sum_{i=1}^{n}\frac{\partial J}{\partial \theta_i}\dot{\theta}_i
+\end{equation}
+
+\textbf{计算方法}：
+\begin{itemize}
+\item 对于每个关节$i$，计算偏导数$\frac{\partial J}{\partial \theta_i}$
+\item 使用链式法则：
+\begin{equation}
+\dot{J}(\theta) = \sum_{i=1}^{n}\frac{\partial J}{\partial \theta_i}\dot{\theta}_i
+\end{equation}
+\end{itemize}
+
+\textbf{数值方法}（如果解析计算困难）：
+\begin{equation}
+\frac{\partial J}{\partial \theta_i} \approx \frac{J(\theta + \epsilon e_i) - J(\theta)}{\epsilon}
+\end{equation}
+其中$e_i$是第$i$个单位向量，$\epsilon$是小量。
+
+\subsubsection{步骤4：计算$\Lambda(\theta)$}
+
+使用前面介绍的方法计算任务空间质量矩阵$\Lambda(\theta)$。
+
+\subsubsection{步骤5：组合各项}
+
+\begin{equation}
+\eta(\theta, V) = J^{-T}(\theta)h(\theta, J^{-1}V) - \Lambda(\theta)\dot{J}(\theta)J^{-1}(\theta)V
+\end{equation}
+
+\subsection{完整算法}
+
+\textbf{计算$\eta(\theta, V)$}：
+\begin{enumerate}
+\item 计算$\dot{\theta} = J^{-1}(\theta)V$
+\item 计算$h(\theta, \dot{\theta})$（使用递归牛顿-欧拉方法）
+\item 计算$\dot{J}(\theta) = \sum_{i=1}^{n}\frac{\partial J}{\partial \theta_i}\dot{\theta}_i$
+\item 计算$\Lambda(\theta) = J^{-T}(\theta)M(\theta)J^{-1}(\theta)$
+\item 计算第一项：$J^{-T}(\theta)h(\theta, \dot{\theta})$
+\item 计算第二项：$\Lambda(\theta)\dot{J}(\theta)J^{-1}(\theta)V$
+\item 组合：$\eta(\theta, V) = \text{第一项} - \text{第二项}$
+\end{enumerate}
+
+\section{计算复杂度总结}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{量} & \textbf{方法} & \textbf{复杂度} \\
+\hline
+$M(\theta)$ & 拉格朗日方法 & $O(n^3)$ \\
+$M(\theta)$ & 递归牛顿-欧拉 & $O(n^2)$ \\
+$h(\theta, \dot{\theta})$ & 递归牛顿-欧拉 & $O(n)$ \\
+$\Lambda(\theta)$ & 直接计算 & $O(n^3)$ \\
+$\eta(\theta, V)$ & 完整计算 & $O(n^3)$ \\
+\hline
+\end{tabular}
+\caption{计算复杂度总结}
+\end{table}
+
+\section{实际实现建议}
+
+\subsection{使用递归牛顿-欧拉方法}
+
+\begin{itemize}
+\item \textbf{推荐}：使用递归牛顿-欧拉方法计算$M(\theta)$和$h(\theta, \dot{\theta})$
+\item \textbf{优点}：
+\begin{itemize}
+\item 计算效率高（$O(n^2)$和$O(n)$）
+\item 数值稳定
+\item 适合实时控制
+\end{itemize}
+\end{itemize}
+
+\subsection{缓存中间结果}
+
+\begin{itemize}
+\item 雅可比矩阵$J(\theta)$：如果$\theta$没有变化，可以重用
+\item 质量矩阵$M(\theta)$：如果$\theta$没有变化，可以重用
+\item $\Lambda(\theta)$：依赖于$M(\theta)$和$J(\theta)$，如果两者都没变化，可以重用
+\end{itemize}
+
+\subsection{处理奇异点}
+
+\begin{itemize}
+\item 检测雅可比矩阵的条件数
+\item 在接近奇异点时，使用阻尼伪逆：
+\begin{equation}
+J^{\dagger} = (J^T J + \lambda I)^{-1}J^T
+\end{equation}
+其中$\lambda$是小的正数
+\end{itemize}
+
+\section{总结}
+
+\begin{enumerate}
+\item \textbf{$M(\theta)$}：使用递归牛顿-欧拉方法，设置$\ddot{\theta}_j = 1$，其他为0，计算$n$次得到所有列
+
+\item \textbf{$h(\theta, \dot{\theta})$}：
+\begin{itemize}
+\item 重力项：设置$\dot{\theta} = 0$，$\ddot{\theta} = 0$，运行递归算法
+\item 科里奥利项：设置$\ddot{\theta} = 0$，$g = 0$，使用给定$\dot{\theta}$运行递归算法
+\end{itemize}
+
+\item \textbf{$\Lambda(\theta)$}：$\Lambda(\theta) = J^{-T}(\theta)M(\theta)J^{-1}(\theta)$
+
+\item \textbf{$\eta(\theta, V)$}：$\eta(\theta, V) = J^{-T}(\theta)h(\theta, J^{-1}V) - \Lambda(\theta)\dot{J}(\theta)J^{-1}(\theta)V$
+\end{enumerate}
+
+这些计算方法为机器人动力学分析和控制提供了基础。
+
+\end{document}

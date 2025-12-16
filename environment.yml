@@ -1,0 +1,13 @@
+name: osic_force_control
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy>=1.19
+  - matplotlib
+  - pandas
+  - pip
+  - pip:
+    - mujoco>=2.3.0
+
