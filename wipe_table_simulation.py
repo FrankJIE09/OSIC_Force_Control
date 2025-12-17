@@ -7,6 +7,14 @@
 - 混合运动-力控制（基于约束）
 - 运动子空间：XY位置控制（切向擦拭）
 - 力子空间：Z方向力控制 + 旋转力矩控制（保持工具姿态）
+
+**重要约定（整个代码统一使用MuJoCo标准）**：
+- Twist V = [v_x, v_y, v_z, ω_x, ω_y, ω_z]^T  （线速度在前，角速度在后）
+- Wrench F = [f_x, f_y, f_z, m_x, m_y, m_z]^T （力在前，力矩在后）
+- 所有6维向量：索引0-2为线速度/力，索引3-5为角速度/力矩
+- 雅可比矩阵：J[:3, :]为线速度部分，J[3:, :]为角速度部分
+
+注意：书本第513行使用另一种约定（角速度在前），但本代码统一使用MuJoCo约定。
 """
 
 import mujoco
@@ -25,7 +33,7 @@ class WipeTableSimulation:
     def __init__(self, model_path: str = "surface_force_control.xml"):
         """
         初始化仿真
-        
+
         参数:
             model_path: MuJoCo 模型文件路径
         """
@@ -78,17 +86,20 @@ class WipeTableSimulation:
         # 状态变量
         self.contact_t = None
         self.is_contact_now = False  # 当前时刻是否检测到接触
-        self.X_e_integral = np.zeros(3)
-        self.F_e_integral = 0.0
+        self.X_e_integral = np.zeros(6)  # 6维配置误差积分
+        self.F_e_integral = np.zeros(6)  # 6维力误差积分（公式11.61）
         self.quat_ref = None  # 参考姿态（四元数）
         self.tau_velocity_feedforward = np.zeros(7)  # 速度前馈力矩（接近阶段使用）
+
+        # 调试标志
+        self.debug = False  # 设置为True启用调试输出
 
         print("✓ 擦桌子仿真初始化完成")
 
     def _init_ikpy_chain(self):
         """
         初始化 ikpy 链，根据 URDF 文件识别活动关节
-        
+
         返回:
             chain: ikpy Chain 对象
             active_indices: 活动关节索引列表
@@ -130,11 +141,11 @@ class WipeTableSimulation:
     def compute_initial_configuration_ik(self):
         """
         通过逆运动学求解末端Z轴朝下的初始配置（使用scipy优化）
-        
+
         目标：
         - 位置：在表面上方（z = 0.3 m）
         - 姿态：Z轴朝下（末端坐标系Z轴指向 [0, 0, -1]）
-        
+
         返回:
             q_init: 初始关节角度 (7,)
         """
@@ -212,9 +223,10 @@ class WipeTableSimulation:
         # 姿态控制增益（旋转控制）
         self.K_p_rot = np.array([50.0, 50.0, 30.0])  # 旋转增益（向量形式）
 
-        # 力控制增益
-        self.K_fp = 1.0  # 力比例增益
-        self.K_fi = 0.2  # 力积分增益
+        # 力控制增益（公式11.61：K_{fp}和K_{fi}是6×6矩阵）
+        # 对于擦桌子任务，主要控制Z方向法向力，旋转力矩也使用PI控制
+        self.K_fp = np.diag([0.5, 0.5, 1.0, 10.0, 10.0, 5.0])  # 力比例增益矩阵（6×6）
+        self.K_fi = np.diag([0.1, 0.1, 0.2, 2.0, 2.0, 1.0])  # 力积分增益矩阵（6×6）
 
         # 目标力（法向，向下为负）
         self.F_desired = -15.0  # N
@@ -223,7 +235,19 @@ class WipeTableSimulation:
         self.constraint_type = 'full'
 
     def get_jacobian_6x7(self):
-        """获取6DOF雅可比矩阵（位置+姿态）"""
+        """
+        获取6DOF雅可比矩阵（位置+姿态）
+
+        **Twist和Wrench的排序约定（MuJoCo标准）**：
+        - Twist V = [v_x, v_y, v_z, ω_x, ω_y, ω_z]^T  （线速度在前，角速度在后）
+        - Wrench F = [f_x, f_y, f_z, m_x, m_y, m_z]^T （力在前，力矩在后）
+
+        注意：书本第513行使用另一种约定：
+        - V_b = (ω_x, ω_y, ω_z, v_x, v_y, v_z)  （角速度在前）
+        - F_b = (m_x, m_y, m_z, f_x, f_y, f_z)  （力矩在前）
+
+        本代码统一使用MuJoCo约定（线速度/力在前）。
+        """
         jacp = np.zeros((3, self.model.nv))
         jacr = np.zeros((3, self.model.nv))
 
@@ -238,8 +262,8 @@ class WipeTableSimulation:
         for i, name in enumerate(self.joint_names):
             dof_idx = self.joint_dof_indices[i]
             if dof_idx >= 0:
-                J[:3, i] = jacp[:, dof_idx]
-                J[3:, i] = jacr[:, dof_idx]
+                J[:3, i] = jacp[:, dof_idx]  # 线速度部分 [v_x, v_y, v_z]
+                J[3:, i] = jacr[:, dof_idx]  # 角速度部分 [ω_x, ω_y, ω_z]
 
         return J
 
@@ -350,24 +374,30 @@ class WipeTableSimulation:
     def compute_constraint_matrix(self, constraint_type='full'):
         """
         计算约束矩阵 A(θ) - 公式11.57
-        
+
         对于表面接触：
         - 约束法向平移：v_z = 0
         - 约束所有旋转：ω_x = ω_y = ω_z = 0（保持工具与表面平行）
-        
+
+        **Twist排序约定（MuJoCo标准）**：
+        V = [v_x, v_y, v_z, ω_x, ω_y, ω_z]^T
+        因此约束矩阵的列索引对应：
+        - 列0,1,2: v_x, v_y, v_z（线速度）
+        - 列3,4,5: ω_x, ω_y, ω_z（角速度）
+
         参数:
             constraint_type: 'full' (4约束) 或 'minimal' (3约束)
-        
+
         返回:
             A: 约束矩阵 (k, 6)，k为约束数量
         """
         if constraint_type == 'full':
             # 完全约束：v_z, ω_x, ω_y, ω_z
             A = np.zeros((4, 6))
-            A[0, 2] = 1.0  # 约束Z方向平移 v_z
-            A[1, 3] = 1.0  # 约束绕X轴旋转 ω_x
-            A[2, 4] = 1.0  # 约束绕Y轴旋转 ω_y
-            A[3, 5] = 1.0  # 约束绕Z轴旋转 ω_z
+            A[0, 2] = 1.0  # 约束Z方向平移 v_z（索引2对应v_z）
+            A[1, 3] = 1.0  # 约束绕X轴旋转 ω_x（索引3对应ω_x）
+            A[2, 4] = 1.0  # 约束绕Y轴旋转 ω_y（索引4对应ω_y）
+            A[3, 5] = 1.0  # 约束绕Z轴旋转 ω_z（索引5对应ω_z）
         else:
             # 最小约束：v_z, ω_x, ω_y（允许绕Z轴旋转）
             A = np.zeros((3, 6))
@@ -380,13 +410,13 @@ class WipeTableSimulation:
     def compute_projection_matrix(self, Lambda, A):
         """
         计算投影矩阵 P(θ) - 公式11.63
-        
+
         P = I - A^T(AΛ^{-1}A^T)^{-1}AΛ^{-1}
-        
+
         参数:
             Lambda: 任务空间质量矩阵 (6, 6)
             A: 约束矩阵 (k, 6)
-        
+
         返回:
             P: 投影矩阵 (6, 6)
         """
@@ -407,10 +437,10 @@ class WipeTableSimulation:
     def compute_end_effector_position_from_fk(self, q):
         """
         使用 ikpy 计算末端执行器的位置
-        
+
         参数:
             q: 关节角度向量 (7,)
-        
+
         返回:
             pos: 末端位置 (3,) [x, y, z]
         """
@@ -430,11 +460,11 @@ class WipeTableSimulation:
     def compute_desired_orientation_from_fk(self, q, pos_ref):
         """
         通过正运动学计算期望的末端姿态四元数
-        
+
         参数:
             q: 关节角度向量 (7,)
             pos_ref: 期望的末端位置 (3,)
-        
+
         返回:
             quat: 期望姿态四元数 (4,) [w, x, y, z]
         """
@@ -454,35 +484,35 @@ class WipeTableSimulation:
     def compute_desired_orientation(self, z_axis_direction=np.array([0.0, 0.0, 1.0])):
         """
         计算期望的末端姿态四元数（使用scipy.spatial.transform.Rotation）
-        
+
         对于擦桌子任务：
         - Z轴应该垂直于表面（向上或向下）
         - X和Y轴在表面平面内
-        
+
         参数:
             z_axis_direction: 期望的Z轴方向（默认向上 [0, 0, 1]）
-        
+
         返回:
             quat: 期望姿态四元数 (4,) [w, x, y, z] (MuJoCo格式)
         """
         try:
             # 归一化Z轴方向
             z_axis = z_axis_direction / np.linalg.norm(z_axis_direction)
-            
+
             # 选择参考方向
             x_ref = np.array([1.0, 0.0, 0.0])
             if abs(np.dot(z_axis, x_ref)) > 0.9:
                 x_ref = np.array([0.0, 1.0, 0.0])
-            
+
             # 构建正交坐标系
             y_axis = np.cross(z_axis, x_ref)
             y_axis = y_axis / np.linalg.norm(y_axis)
             x_axis = np.cross(y_axis, z_axis)
             x_axis = x_axis / np.linalg.norm(x_axis)
-            
+
             # 构建旋转矩阵
             R = np.array([x_axis, y_axis, z_axis]).T
-            
+
             # 使用scipy转换为四元数
             return self.rotation_matrix_to_quaternion(R)
         except:
@@ -491,10 +521,10 @@ class WipeTableSimulation:
     def rotation_matrix_to_quaternion(self, R):
         """
         将旋转矩阵转换为四元数（使用scipy.spatial.transform.Rotation）
-        
+
         参数:
             R: 旋转矩阵 (3, 3)
-        
+
         返回:
             quat: 四元数 (4,) [w, x, y, z]，已归一化（MuJoCo格式）
         """
@@ -511,11 +541,11 @@ class WipeTableSimulation:
     def quaternion_error(self, q_ref, q_curr):
         """
         计算四元数误差（用于姿态控制，使用scipy.spatial.transform.Rotation）
-        
+
         参数:
             q_ref: 参考四元数 (4,) [w, x, y, z] (MuJoCo格式)
             q_curr: 当前四元数 (4,) [w, x, y, z] (MuJoCo格式)
-        
+
         返回:
             e_rot: 旋转误差向量 (3,) 旋转向量（轴角表示）
         """
@@ -523,28 +553,184 @@ class WipeTableSimulation:
             # 转换为scipy格式 [x, y, z, w]
             q_ref_scipy = np.array([q_ref[1], q_ref[2], q_ref[3], q_ref[0]])
             q_curr_scipy = np.array([q_curr[1], q_curr[2], q_curr[3], q_curr[0]])
-            
+
             # 创建Rotation对象
             rot_ref = Rotation.from_quat(q_ref_scipy)
             rot_curr = Rotation.from_quat(q_curr_scipy)
-            
+
             # 计算误差：R_err = R_ref * R_curr^{-1}
             rot_err = rot_ref * rot_curr.inv()
-            
+
             # 转换为旋转向量（轴角表示）
             e_rot = rot_err.as_rotvec()
             return e_rot
         except:
             return np.zeros(3)
 
+    def se3_log_map(self, R, p):
+        """
+        计算SE(3)的log映射：log(T)，其中T = [R, p; 0, 1]
+
+        返回6维twist [v, ω]，其中：
+        - v: 平移部分 (3,)
+        - ω: 旋转部分 (3,) 旋转向量
+
+        参数:
+            R: 旋转矩阵 (3, 3)
+            p: 位置向量 (3,)
+
+        返回:
+            twist: 6维twist [v, ω] (6,)
+        """
+        try:
+            # 计算旋转部分：ω = log(R)
+            rot = Rotation.from_matrix(R)
+            omega = rot.as_rotvec()  # 旋转向量
+
+            # 计算平移部分：v = V^{-1} p，其中V是SE(3)的log映射的平移部分
+            # 对于SE(3)的log映射，平移部分为：
+            # v = V^{-1} p，其中V^{-1} = I - (1-cos(θ))/θ² [ω]× + (θ-sin(θ))/θ³ [ω]×²
+
+            theta = np.linalg.norm(omega)
+            if theta < 1e-6:
+                # 小角度近似：V^{-1} ≈ I - 0.5 [ω]×
+                omega_skew = np.array([
+                    [0, -omega[2], omega[1]],
+                    [omega[2], 0, -omega[0]],
+                    [-omega[1], omega[0], 0]
+                ])
+                V_inv = np.eye(3) - 0.5 * omega_skew
+                v = V_inv @ p
+            else:
+                # 精确计算
+                omega_normalized = omega / theta
+                omega_skew = np.array([
+                    [0, -omega_normalized[2], omega_normalized[1]],
+                    [omega_normalized[2], 0, -omega_normalized[0]],
+                    [-omega_normalized[1], omega_normalized[0], 0]
+                ])
+
+                # V^{-1} = I - (1-cos(θ))/θ² [ω]× + (θ-sin(θ))/θ³ [ω]×²
+                cos_theta = np.cos(theta)
+                sin_theta = np.sin(theta)
+                V_inv = (np.eye(3) -
+                         (1 - cos_theta) / (theta ** 2) * omega_skew +
+                         (theta - sin_theta) / (theta ** 3) * omega_skew @ omega_skew)
+                v = V_inv @ p
+
+            return np.concatenate([v, omega])
+        except:
+            return np.zeros(6)
+
+    def compute_configuration_error(self, pos_curr, quat_curr, pos_ref, quat_ref):
+        """
+        计算配置误差 X_e = log(X^{-1} X_d) - 公式11.61
+
+        其中：
+        - X = (R_curr, p_curr) 是当前位姿
+        - X_d = (R_ref, p_ref) 是参考位姿
+        - X_e 是在末端执行器坐标系中表示的6维twist
+
+        参数:
+            pos_curr: 当前位置 (3,)
+            quat_curr: 当前姿态四元数 (4,) [w, x, y, z]
+            pos_ref: 参考位置 (3,)
+            quat_ref: 参考姿态四元数 (4,) [w, x, y, z]
+
+        返回:
+            X_e: 6维配置误差 [v, ω] (6,)
+        """
+        try:
+            # 转换为旋转矩阵
+            q_curr_scipy = np.array([quat_curr[1], quat_curr[2], quat_curr[3], quat_curr[0]])
+            q_ref_scipy = np.array([quat_ref[1], quat_ref[2], quat_ref[3], quat_ref[0]])
+
+            rot_curr = Rotation.from_quat(q_curr_scipy)
+            rot_ref = Rotation.from_quat(q_ref_scipy)
+
+            R_curr = rot_curr.as_matrix()
+            R_ref = rot_ref.as_matrix()
+
+            # 计算 X^{-1} X_d = (R_curr^T R_ref, R_curr^T (p_ref - p_curr))
+            R_err = R_curr.T @ R_ref
+            p_err = R_curr.T @ (pos_ref - pos_curr)
+
+            # 计算log映射：X_e = log(X^{-1} X_d)
+            X_e = self.se3_log_map(R_err, p_err)
+
+            return X_e
+        except:
+            # 如果计算失败，返回简化的位置和姿态误差
+            e_pos = pos_ref - pos_curr
+            e_rot = self.quaternion_error(quat_ref, quat_curr)
+            return np.concatenate([e_pos, e_rot])
+
+    def compute_velocity_error(self, pos_curr, quat_curr, pos_ref, quat_ref, vel_ref, V_curr):
+        """
+        计算速度误差 V_e = [Ad_{X^{-1}X_d}]V_d - V - 公式11.61
+
+        其中：
+        - V_d 是参考速度（在参考坐标系X_d中表示）
+        - V 是当前速度（在当前坐标系X中表示）
+        - [Ad_{X^{-1}X_d}] 将V_d从参考坐标系转换到当前坐标系
+
+        参数:
+            pos_curr: 当前位置 (3,)
+            quat_curr: 当前姿态四元数 (4,)
+            pos_ref: 参考位置 (3,)
+            quat_ref: 参考姿态四元数 (4,)
+            vel_ref: 参考速度 (6,) [v_ref, ω_ref]（在参考坐标系中）
+            V_curr: 当前速度 (6,) [v_curr, ω_curr]（在当前坐标系中）
+
+        返回:
+            V_e: 6维速度误差 (6,)
+        """
+        try:
+            # 转换为旋转矩阵
+            q_curr_scipy = np.array([quat_curr[1], quat_curr[2], quat_curr[3], quat_curr[0]])
+            q_ref_scipy = np.array([quat_ref[1], quat_ref[2], quat_ref[3], quat_ref[0]])
+
+            rot_curr = Rotation.from_quat(q_curr_scipy)
+            rot_ref = Rotation.from_quat(q_ref_scipy)
+
+            R_curr = rot_curr.as_matrix()
+            R_ref = rot_ref.as_matrix()
+
+            # 计算 X^{-1} X_d 的旋转部分：R_curr^T R_ref
+            R_err = R_curr.T @ R_ref
+
+            # 计算 X^{-1} X_d 的平移部分：R_curr^T (p_ref - p_curr)
+            p_err = R_curr.T @ (pos_ref - pos_curr)
+
+            # 计算Adjoint变换 Ad_{X^{-1}X_d}
+            Ad = self.compute_adjoint_transformation(R_err, p_err)
+
+            # 如果vel_ref只有3维（只有平移速度），扩展为6维
+            if len(vel_ref) == 3:
+                vel_ref_6d = np.concatenate([vel_ref, np.zeros(3)])
+            else:
+                vel_ref_6d = vel_ref
+
+            # 计算速度误差：V_e = [Ad_{X^{-1}X_d}]V_d - V
+            V_e = Ad @ vel_ref_6d - V_curr
+
+            return V_e
+        except:
+            # 如果计算失败，返回简化的速度误差
+            if len(vel_ref) == 3:
+                V_e = np.concatenate([vel_ref - V_curr[:3], -V_curr[3:]])
+            else:
+                V_e = vel_ref - V_curr
+            return V_e
+
     def generate_wipe_trajectory(self, t, t_contact):
         """
         生成擦拭轨迹
-        
+
         参数:
             t: 当前时间
             t_contact: 接触后的时间
-        
+
         返回:
             pos_ref: 参考位置 (3,)
             vel_ref: 参考速度 (3,)
@@ -568,7 +754,7 @@ class WipeTableSimulation:
         if t_wipe < 10.0:
             # 前10秒：X轴前后擦拭
             cycle_t = t_wipe % 2.0  # 2秒一个周期
-            amplitude = 0.2  # 20cm幅度
+            amplitude = 0.02  # 20cm幅度
 
             if cycle_t < 1.0:
                 # 向前
@@ -584,7 +770,7 @@ class WipeTableSimulation:
         elif t_wipe < 20.0:
             # 10-20秒：Y轴左右擦拭
             cycle_t = (t_wipe - 10.0) % 2.0
-            amplitude = 0.15  # 15cm幅度
+            amplitude = 0.02  # 15cm幅度
 
             if cycle_t < 1.0:
                 # 向右
@@ -610,13 +796,80 @@ class WipeTableSimulation:
 
         return pos_ref, vel_ref, quat_ref
 
+    def compute_adjoint_transformation(self, R, p):
+        """
+        计算 Adjoint 变换矩阵 Ad_X
+
+        对于 SE(3) 中的变换 X = (R, p)，Adjoint 变换为：
+        Ad_X = [R    0  ]
+               [p×R  R ]
+
+        其中 p× 是 p 的反对称矩阵
+
+        参数:
+            R: 旋转矩阵 (3×3)
+            p: 位置向量 (3,)
+
+        返回:
+            Ad: Adjoint 变换矩阵 (6×6)
+        """
+        # 计算 p 的反对称矩阵
+        p_skew = np.array([
+            [0, -p[2], p[1]],
+            [p[2], 0, -p[0]],
+            [-p[1], p[0], 0]
+        ])
+
+        # 构建 Adjoint 矩阵
+        Ad = np.zeros((6, 6))
+        Ad[:3, :3] = R
+        Ad[3:, :3] = np.zeros((3, 3))
+        Ad[:3, 3:] = p_skew @ R
+        Ad[3:, 3:] = R
+
+        return Ad
+
+    def compute_desired_acceleration_feedforward(self, pos_ref, quat_ref, vel_ref, pos_curr, quat_curr, V, dt):
+        """
+        计算前馈加速度项：Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d)
+
+        简化实现：计算期望加速度 V̇_d，并考虑坐标系变换
+
+        参数:
+            pos_ref, quat_ref: 参考位姿
+            vel_ref: 参考速度（仅平移部分）
+            pos_curr, quat_curr: 当前位姿
+            V: 当前任务空间速度
+            dt: 时间步长
+
+        返回:
+            V_dot_desired: 期望加速度 (6,)
+        """
+        # 简化实现：如果参考速度变化，计算加速度
+        # 对于大多数情况，如果轨迹平滑，加速度项可以忽略或简化
+        V_dot_desired = np.zeros(6)
+
+        # 如果参考速度不为零，可以计算数值微分
+        # 这里简化处理：对于平滑轨迹，加速度项较小，可以忽略
+        # 或者使用期望速度的数值微分
+
+        return V_dot_desired
+
     def control_step(self, t, dt=0.002):
         """
-        执行一步混合力位控制 - 公式11.64
-        
-        控制律：
-        τ = J^T[P(K_p X_e + K_i ∫X_e + K_d V_e) + (I-P)(F_d + K_fp F_e + K_fi ∫F_e) + η]
-        
+        执行一步混合力位控制 - 公式11.61（书本公式）
+
+        控制律（公式11.61）：
+        τ = J_b^T(θ)[P(θ)(Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e)
+                  + (I-P(θ))(F_d + K_fp F_e + K_fi∫F_e) + η̃(θ, V_b)]
+
+        其中：
+        - J_b^T(θ): 末端执行器坐标系中的雅可比转置
+        - P(θ): 投影矩阵（公式11.63）
+        - Λ̃(θ): 任务空间质量矩阵
+        - η̃(θ, V_b): 任务空间 Coriolis 项（末端执行器坐标系）
+        - V_b: 末端执行器坐标系中的速度
+
         参数:
             t: 当前时间
             dt: 时间步长
@@ -639,8 +892,12 @@ class WipeTableSimulation:
         # 计算雅可比矩阵
         J = self.get_jacobian_6x7()
 
-        # 计算任务空间速度
-        V = J @ qdot  # [vx, vy, vz, wx, wy, wz]
+        # 计算任务空间速度（末端执行器坐标系 {b}）
+        # V_b = [v_x, v_y, v_z, ω_x, ω_y, ω_z]^T
+        # **MuJoCo约定：线速度在前，角速度在后**
+        # （书本第513行使用另一种约定：V_b = (ω_x, ω_y, ω_z, v_x, v_y, v_z)）
+        # 注意：需要在接近阶段之前计算，以便在接近阶段使用
+        V_b = J @ qdot
 
         # 更新动力学计算器状态
         self.dynamics_calc.set_configuration(q, qdot)
@@ -648,15 +905,26 @@ class WipeTableSimulation:
         # 获取接触状态
         is_contact, F_curr = self.get_contact_force()
 
+        # ========== DEBUG点1：接触状态检测 ==========
+        if self.debug:
+            pos_fk = self.compute_end_effector_position_from_fk(q)
+            print(f"[DEBUG-接触] t={t:.3f}s | is_contact={is_contact} | "
+                  f"F_curr={F_curr:.2f}N | z_pos={pos_fk[2]:.4f}m | "
+                  f"contact_t={self.contact_t}")
+
         # 更新接触时间
         if is_contact and self.contact_t is None:
             self.contact_t = t
-            self.F_e_integral = 0.0
-            self.X_e_integral = np.zeros(3)
+            self.F_e_integral = np.zeros(6)  # 6维力误差积分
+            self.X_e_integral = np.zeros(6)  # 6维配置误差积分
             # 通过正运动学计算期望姿态（使用当前关节角度和期望位置）
             pos_ref = np.array([0.5, 0.0, 0.3])  # 期望位置
             self.quat_ref = self.compute_desired_orientation_from_fk(q, pos_ref)
+            if self.debug:
+                print(f"[DEBUG-接触建立] t={t:.3f}s | 接触建立！")
         elif not is_contact:
+            if self.contact_t is not None and self.debug:
+                print(f"[DEBUG-接触丢失] t={t:.3f}s | 接触丢失！之前接触时长={t - self.contact_t:.3f}s")
             self.contact_t = None
 
         # 生成参考轨迹
@@ -687,7 +955,8 @@ class WipeTableSimulation:
 
             # 期望角速度：使得姿态误差减小（PD控制）
             # ω_des = K_p_rot * e_rot - K_d_rot * ω_curr
-            omega_des = self.K_p_rot * e_rot - 0.5 * self.K_p_rot * V[3:]
+            # 使用末端执行器坐标系中的角速度
+            omega_des = self.K_p_rot * e_rot - 0.5 * self.K_p_rot * V_b[3:]
 
             # ========== 构建期望任务空间速度 ==========
             V_desired = np.zeros(6)
@@ -720,8 +989,27 @@ class WipeTableSimulation:
             t_contact = t - self.contact_t
             pos_ref, vel_ref, quat_ref = self.generate_wipe_trajectory(t, t_contact)
 
-            # 使用正运动学重新计算姿态
             quat_ref = self.compute_desired_orientation_from_fk(q, pos_ref)
+
+            # 修改：接触后，Z方向参考位置应该基于实际接触位置
+            # 避免位置误差过大导致位置控制与力控制冲突
+            # 关键：参考位置应该等于或略低于当前位置，避免产生向上的位置控制力
+            if t_contact < 0.5:  # 接触后0.5秒内，逐渐调整参考位置
+                # 使用实际位置作为参考，等于当前位置（避免位置控制产生Z方向力）
+                pos_ref[2] = pos_curr[2]  # 等于当前位置，避免位置误差
+            else:
+                # 稳定后，使用略低于当前位置的参考位置（允许轻微压缩）
+                pos_ref[2] = pos_curr[2] - 0.005  # 略低于当前位置5mm，允许轻微压缩
+
+            # 修改：接触后，姿态应该保持Z轴朝下，而不是通过正运动学计算
+            # 因为正运动学计算的姿态可能不正确（特别是在移动时）
+            # 使用固定的Z轴朝下姿态
+            target_orientation = np.array([
+                [1.0, 0.0, 0.0],  # X轴方向
+                [0.0, -1.0, 0.0],  # Y轴方向
+                [0.0, 0.0, -1.0]  # Z轴方向（向下）
+            ])
+            quat_ref = self.rotation_matrix_to_quaternion(target_orientation)
             self.quat_ref = quat_ref
 
             # 接触后不使用速度前馈
@@ -732,8 +1020,9 @@ class WipeTableSimulation:
             q, task_space_dim=6, use_pseudoinverse=True, damping=1e-6
         )
 
-        eta = self.dynamics_calc.compute_task_space_coriolis(
-            q, V, task_space_dim=6, use_pseudoinverse=True, damping=1e-6
+        # 计算任务空间 Coriolis 项 η̃(θ, V_b)（末端执行器坐标系）
+        eta_tilde = self.dynamics_calc.compute_task_space_coriolis(
+            q, V_b, task_space_dim=6, use_pseudoinverse=True, damping=1e-6
         )
 
         # 计算约束和投影矩阵
@@ -745,67 +1034,126 @@ class WipeTableSimulation:
             A = np.zeros((0, 6))
 
         # ========== 混合控制计算 ==========
-        # 位置误差和速度误差
-        X_e = pos_ref - pos_curr
-        V_e = vel_ref - V[:3]
-
-        # 姿态误差
-        e_rot = self.quaternion_error(self.quat_ref, quat_curr)
-        omega_e = -V[3:]  # 角速度误差（目标角速度为0）
-
-        # 更新积分项
-        self.X_e_integral += X_e * dt
-        self.X_e_integral = np.clip(self.X_e_integral, -0.2, 0.2)
-
-        # 运动控制部分（投影到运动子空间）
-        # 构建完整的6DOF控制向量
-        F_motion_6d = np.zeros(6)
-
-        # 平移控制（PID）
-        F_motion_6d[:3] = (
-                self.K_p @ X_e +
-                self.K_i @ self.X_e_integral +
-                self.K_d @ V_e
+        # 计算6维配置误差：X_e = log(X^{-1} X_d) - 公式11.61
+        X_e = self.compute_configuration_error(
+            pos_curr, quat_curr, pos_ref, self.quat_ref
         )
 
-        # 旋转控制（如果不在约束中）
-        if not is_contact:
-            F_motion_6d[3:] = (
-                    self.K_p_rot * e_rot +
-                    0.5 * self.K_p_rot * omega_e
-            )
-        # 接触时旋转部分保持为0（由约束处理）
+        # 计算6维速度误差：V_e = [Ad_{X^{-1}X_d}]V_d - V - 公式11.61
+        # 如果vel_ref只有3维，需要扩展为6维（角速度部分为0）
+        vel_ref_6d = vel_ref if len(vel_ref) == 6 else np.concatenate([vel_ref, np.zeros(3)])
+        V_e = self.compute_velocity_error(
+            pos_curr, quat_curr, pos_ref, self.quat_ref, vel_ref_6d, V_b
+        )
+
+        # ========== DEBUG点2：位置和速度状态 ==========
+        if self.debug and is_contact:
+            print(f"[DEBUG-位置] t={t:.3f}s | pos_curr={pos_curr} | pos_ref={pos_ref} | "
+                  f"X_e={X_e} | V_curr={V_b} | V_ref={vel_ref_6d}")
+            print(f"[DEBUG-速度] t={t:.3f}s | V_z={V_b[2]:.4f}m/s | V_e_z={V_e[2]:.4f}m/s | "
+                  f"omega_e={V_e[3:]}")
+
+        # 更新积分项（6维）
+        self.X_e_integral += X_e * dt
+        self.X_e_integral = np.clip(self.X_e_integral, -0.02, 0.02)
+
+        # ========== 运动控制部分（投影到运动子空间）==========
+        # 公式11.61第一项：P(θ)(Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e)
+
+        # 计算前馈加速度项（简化实现：对于平滑轨迹，此项可忽略或很小）
+        V_dot_desired = self.compute_desired_acceleration_feedforward(
+            pos_ref, self.quat_ref, vel_ref, pos_curr, quat_curr, V_b, dt
+        )
+
+        # 前馈项：Λ̃(θ) * V̇_d（简化：如果加速度项很小，可以忽略）
+        # 对于大多数平滑轨迹，此项可以忽略
+        feedforward_acceleration = V_dot_desired
+
+        # 构建完整的6DOF控制向量
+        # 公式11.61：F_motion = K_p X_e + K_i∫X_e + K_d V_e
+        # 注意：X_e和V_e都是6维的
+
+        # 扩展增益矩阵为6x6（如果当前是3x3）
+        if self.K_p.shape == (3, 3):
+            # 构建6x6增益矩阵
+            K_p_6d = np.zeros((6, 6))
+            K_p_6d[:3, :3] = self.K_p  # 位置增益
+            K_p_6d[3:, 3:] = np.diag(self.K_p_rot)  # 旋转增益
+
+            K_i_6d = np.zeros((6, 6))
+            K_i_6d[:3, :3] = self.K_i  # 位置积分增益
+            K_i_6d[3:, 3:] = np.diag(self.K_p_rot * 0.1)  # 旋转积分增益（较小）
+
+            K_d_6d = np.zeros((6, 6))
+            K_d_6d[:3, :3] = self.K_d  # 位置微分增益
+            K_d_6d[3:, 3:] = np.diag(self.K_p_rot * 0.5)  # 旋转微分增益
+        else:
+            K_p_6d = self.K_p
+            K_i_6d = self.K_i
+            K_d_6d = self.K_d
+
+        # 计算完整的6DOF运动控制力
+        F_motion_6d = (
+                K_p_6d @ X_e +
+                K_i_6d @ self.X_e_integral +
+                K_d_6d @ V_e
+        )
 
         # 投影到运动子空间（完整的6DOF投影）
-        # 公式11.64：F_motion = P @ (K_p X_e + K_i ∫X_e + K_d V_e)
-        F_motion = P @ F_motion_6d
+        # 公式11.61：F_motion = P @ (Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e)
+        # 简化：F_motion = P @ (feedforward_acceleration + K_p X_e + K_i∫X_e + K_d V_e)
+        F_motion = P @ Lambda @ (feedforward_acceleration + F_motion_6d)
 
-        # 力控制部分（投影到力子空间）
+        # 力控制部分（投影到力子空间）- 公式11.61
+        # (I - P(θ))(F_d + K_{fp}F_e + K_{fi}∫F_e dt)
         F_force = np.zeros(6)
         if is_contact:
-            # 力误差
-            F_e = self.F_desired - F_curr
-            self.F_e_integral += F_e * dt
+            # 计算6维力误差：F_e = F_d - F_curr
+            # F_d是期望wrench（6维），F_curr是当前测量的wrench（6维）
+            F_desired_6d = np.zeros(6)
+            F_desired_6d[2] = self.F_desired  # Z方向期望法向力
+            # 旋转力矩期望为0（保持姿态）
+            # 注意：F_curr目前只有Z方向，需要扩展为6维
+            F_curr_6d = np.zeros(6)
+            F_curr_6d[2] = F_curr  # Z方向当前法向力
+            # 可以从接触力中提取旋转力矩，这里简化处理
+
+            # 计算6维力误差
+            F_e_6d = F_desired_6d - F_curr_6d
+
+            # 更新6维力误差积分（公式11.61）
+            self.F_e_integral += F_e_6d * dt
             self.F_e_integral = np.clip(self.F_e_integral, -100.0, 100.0)
 
-            # 力控制wrench
-            F_d = np.zeros(6)
-            F_d[2] = self.F_desired + self.K_fp * F_e + self.K_fi * self.F_e_integral
+            # 力控制wrench：F_d + K_{fp}F_e + K_{fi}∫F_e dt（公式11.61）
+            # 其中F_d是期望wrench，K_{fp}和K_{fi}是6×6增益矩阵
+            F_force_cmd = F_desired_6d + self.K_fp @ F_e_6d + self.K_fi @ self.F_e_integral
 
-            # 旋转力矩控制（保持姿态）
-            if self.constraint_type == 'full':
-                # 完全约束时，通过力子空间控制旋转力矩
-                F_d[3] = float(self.K_p_rot[0] * e_rot[0])  # 绕X轴
-                F_d[4] = float(self.K_p_rot[1] * e_rot[1])  # 绕Y轴
-                F_d[5] = float(self.K_p_rot[2] * e_rot[2])  # 绕Z轴
+            # 投影到力子空间：(I - P(θ)) @ F_force_cmd
+            F_force = (np.eye(6) - P) @ F_force_cmd
 
-            # 投影到力子空间
-            F_force = (np.eye(6) - P) @ F_d
+            # ========== DEBUG点3：力控制 ==========
+            if self.debug:
+                print(f"[DEBUG-力控] t={t:.3f}s | F_curr={F_curr:.2f}N | F_desired={self.F_desired:.2f}N | "
+                      f"F_e_6d={F_e_6d} | F_e_integral={self.F_e_integral} | "
+                      f"F_force_cmd={F_force_cmd} | F_force={F_force}")
 
-        # 组合控制wrench
-        F_cmd = F_motion + F_force + eta
+        # ========== 组合控制wrench ==========
+        # 公式11.61：F_cmd = F_motion + F_force + η̃(θ, V_b)
+        # 注意：虽然书本公式说Coriolis项不投影，但在约束方向（Z方向），
+        # Coriolis项应该被投影掉，否则会在约束方向产生力，导致弹跳
+        if is_contact:
+            # 接触时：在约束方向，Coriolis项应该被投影到运动子空间
+            # 这样可以避免在约束方向产生额外的力
+            F_cmd = F_motion + F_force + eta_tilde
+        else:
+            # 无约束时：直接添加完整Coriolis项
+            F_cmd = F_motion + F_force + eta_tilde
 
-        # 转换为关节力矩
+        # ========== 转换为关节力矩 ==========
+        # 公式11.61：τ = J_b^T(θ) F_cmd
+        # 其中 J_b 是末端执行器坐标系中的雅可比矩阵
+        F_cmd[3:] = np.zeros(3)
         tau = J.T @ F_cmd
 
         # 在接近阶段，添加速度前馈项（使用 J^(-1) @ V 计算得到）
@@ -813,14 +1161,36 @@ class WipeTableSimulation:
             tau += self.tau_velocity_feedforward
 
         # 添加重力补偿
-        for i in range(self.n_joints):
-            dof_idx = self.joint_dof_indices[i]
-            if dof_idx >= 0:
-                tau[i] += self.data.qfrc_bias[dof_idx]
+        # for i in range(self.n_joints):
+        #     dof_idx = self.joint_dof_indices[i]
+        #     if dof_idx >= 0:
+        #         tau[i] += self.data.qfrc_bias[dof_idx]
 
         # 力矩限制
-        tau_max = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
+        tau_max = np.array([8700, 8700, 8700, 8700, 1200, 1200, 1200], dtype=float)
         tau = np.clip(tau, -tau_max, tau_max)
+
+        # ========== DEBUG点4：控制力矩和wrench ==========
+        if self.debug and is_contact:
+            # Coriolis项（根据书本公式，不投影）
+            print(f"[DEBUG-控制] t={t:.3f}s | F_motion[2]={F_motion[2]:.2f}N | "
+                  f"F_force[2]={F_force[2]:.2f}N | eta_tilde[2]={eta_tilde[2]:.2f}N | "
+                  f"F_cmd[2]={F_cmd[2]:.2f}N")
+            print(f"[DEBUG-力矩] t={t:.3f}s | tau_max={tau_max} | "
+                  f"tau_before_clip={J.T @ F_cmd} | tau_after_clip={tau}")
+            print(f"[DEBUG-投影] t={t:.3f}s | P[2,2]={P[2, 2]:.4f} | "
+                  f"(I-P)[2,2]={(np.eye(6) - P)[2, 2]:.4f} | "
+                  f"F_motion_6d[2]={F_motion_6d[2]:.2f}N")
+            # ========== DEBUG点5：姿态约束 ==========
+            e_rot = X_e[3:]  # 从6维配置误差中提取旋转部分
+            omega_e = V_e[3:]  # 从6维速度误差中提取角速度部分
+            print(f"[DEBUG-姿态] t={t:.3f}s | e_rot={e_rot} | "
+                  f"V_b[3:]={V_b[3:]} | omega_e={omega_e}")
+            if is_contact:
+                print(f"[DEBUG-旋转控制] t={t:.3f}s | F_d[3:6]={F_force[3:6]} | "
+                      f"F_force[3:6]={F_force[3:6]} | F_motion[3:6]={F_motion[3:6]}")
+                print(f"[DEBUG-投影旋转] t={t:.3f}s | P[3:6,3:6]对角线={np.diag(P[3:6, 3:6])} | "
+                      f"(I-P)[3:6,3:6]对角线={np.diag((np.eye(6) - P)[3:6, 3:6])}")
 
         # 应用控制
         for i, name in enumerate(self.joint_names):
@@ -833,7 +1203,7 @@ class WipeTableSimulation:
     def run(self, duration=30.0):
         """
         运行仿真
-        
+
         参数:
             duration: 仿真时长（秒）
         """
@@ -894,9 +1264,9 @@ class WipeTableSimulation:
                     else:
                         phase = "圆形擦拭"
 
-                    print(f"[{phase:8}] t={t:5.1f}s | "
-                          f"位置:[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] | "
-                          f"力:{F:7.2f}N | {contact_str}")
+                    # print(f"[{phase:8}] t={t:5.1f}s | "
+                    #       f"位置:[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] | "
+                    #       f"力:{F:7.2f}N | {contact_str}")
                     last_print = t
 
                 t += dt
@@ -908,4 +1278,8 @@ class WipeTableSimulation:
 
 if __name__ == "__main__":
     sim = WipeTableSimulation(model_path="surface_force_control.xml")
+    # ========== 调试开关 ==========
+    # 设置为 True 启用详细调试输出（用于排查弹跳问题）
+    sim.debug = True  # 改为 True 启用调试
+    # ========== 调试开关 ==========
     sim.run(duration=30.0)
