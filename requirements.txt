@@ -1,0 +1,5 @@
+numpy>=1.19
+matplotlib
+pandas
+mujoco>=2.3.0
+
