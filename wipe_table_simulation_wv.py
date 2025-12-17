@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-擦桌子仿真 - 基于混合力位控制（角速度在前版本）
-使用 MuJoCo Franka Panda 模型实现表面擦拭任务
+表面力控制仿真 - 基于混合力位控制（角速度在前版本）
+使用 MuJoCo Franka Panda 模型实现表面接触力控制任务
 
 控制方法：
 - 混合运动-力控制（基于约束）
-- 运动子空间：XY位置控制（切向擦拭）
+- 运动子空间：位置和姿态控制
 - 力子空间：Z方向力控制 + 旋转力矩控制（保持工具姿态）
 
 **重要约定（书本第513行约定）**：
@@ -93,8 +93,9 @@ class WipeTableSimulation:
 
         # 调试标志
         self.debug = False  # 设置为True启用调试输出
+        self.last_debug_time = -2.0  # 上次debug输出的时间（初始化为-2秒，确保第一次输出）
 
-        print("✓ 擦桌子仿真初始化完成")
+        print("✓ 表面力控制仿真初始化完成")
 
     def _init_ikpy_chain(self):
         """
@@ -224,7 +225,7 @@ class WipeTableSimulation:
         self.K_p_rot = np.array([50.0, 50.0, 30.0])  # 旋转增益（向量形式）
 
         # 力控制增益（公式11.61：K_{fp}和K_{fi}是6×6矩阵）
-        # 对于擦桌子任务，主要控制Z方向法向力，旋转力矩也使用PI控制
+        # 主要控制Z方向法向力，旋转力矩也使用PI控制
         self.K_fp = np.diag([0.5, 0.5, 1.0, 10.0, 10.0, 5.0])  # 力比例增益矩阵（6×6）
         self.K_fi = np.diag([0.1, 0.1, 0.2, 2.0, 2.0, 1.0])  # 力积分增益矩阵（6×6）
 
@@ -481,7 +482,7 @@ class WipeTableSimulation:
         """
         计算期望的末端姿态四元数（使用scipy.spatial.transform.Rotation）
 
-        对于擦桌子任务：
+        对于表面接触任务：
         - Z轴应该垂直于表面（向上或向下）
         - X和Y轴在表面平面内
 
@@ -719,78 +720,6 @@ class WipeTableSimulation:
                 V_e = vel_ref - V_curr
             return V_e
 
-    def generate_wipe_trajectory(self, t, t_contact):
-        """
-        生成擦拭轨迹
-
-        参数:
-            t: 当前时间
-            t_contact: 接触后的时间
-
-        返回:
-            pos_ref: 参考位置 (3,)
-            vel_ref: 参考速度 (3,)
-            quat_ref: 参考姿态（四元数）(4,)
-        """
-        # 默认参考位置（表面中心）
-        pos_ref = np.array([0.5, 0.0, 0.3])
-        vel_ref = np.array([0.0, 0.0, 0.0])
-
-        # 参考姿态：将在 control_step 中通过正运动学计算
-        # 这里先使用默认值（会在调用时被正运动学结果覆盖）
-        quat_ref = np.array([1.0, 0.0, 0.0, 0.0])  # 临时值
-
-        if t_contact is None or t_contact < 2.0:
-            # 接触前或刚接触：保持当前位置，准备下降
-            return pos_ref, vel_ref, quat_ref
-
-        # 接触后开始擦拭运动
-        t_wipe = t_contact - 2.0
-
-        if t_wipe < 10.0:
-            # 前10秒：X轴前后擦拭
-            cycle_t = t_wipe % 2.0  # 2秒一个周期
-            amplitude = 0.02  # 20cm幅度
-
-            if cycle_t < 1.0:
-                # 向前
-                progress = cycle_t / 1.0
-                pos_ref[0] = 0.5 + amplitude * np.sin(progress * np.pi)
-                vel_ref[0] = amplitude * np.pi / 1.0 * np.cos(progress * np.pi)
-            else:
-                # 向后
-                progress = (cycle_t - 1.0) / 1.0
-                pos_ref[0] = 0.5 + amplitude * np.sin((1.0 - progress) * np.pi)
-                vel_ref[0] = -amplitude * np.pi / 1.0 * np.cos((1.0 - progress) * np.pi)
-
-        elif t_wipe < 20.0:
-            # 10-20秒：Y轴左右擦拭
-            cycle_t = (t_wipe - 10.0) % 2.0
-            amplitude = 0.02  # 15cm幅度
-
-            if cycle_t < 1.0:
-                # 向右
-                progress = cycle_t / 1.0
-                pos_ref[1] = amplitude * np.sin(progress * np.pi)
-                vel_ref[1] = amplitude * np.pi / 1.0 * np.cos(progress * np.pi)
-            else:
-                # 向左
-                progress = (cycle_t - 1.0) / 1.0
-                pos_ref[1] = amplitude * np.sin((1.0 - progress) * np.pi)
-                vel_ref[1] = -amplitude * np.pi / 1.0 * np.cos((1.0 - progress) * np.pi)
-
-        else:
-            # 20秒后：圆形擦拭
-            cycle_t = (t_wipe - 20.0) % 4.0
-            radius = 0.15
-            angle = 2.0 * np.pi * cycle_t / 4.0
-
-            pos_ref[0] = 0.5 + radius * np.cos(angle)
-            pos_ref[1] = radius * np.sin(angle)
-            vel_ref[0] = -radius * 2.0 * np.pi / 4.0 * np.sin(angle)
-            vel_ref[1] = radius * 2.0 * np.pi / 4.0 * np.cos(angle)
-
-        return pos_ref, vel_ref, quat_ref
 
     def compute_adjoint_transformation(self, R, p):
         """
@@ -904,8 +833,13 @@ class WipeTableSimulation:
         # 获取接触状态
         is_contact, F_curr = self.get_contact_force()
 
+        # ========== 检查是否应该输出debug信息（每2秒一次）==========
+        should_debug = self.debug and (t - self.last_debug_time >= 2.0)
+        if should_debug:
+            self.last_debug_time = t
+
         # ========== DEBUG点1：接触状态检测 ==========
-        if self.debug:
+        if should_debug:
             pos_fk = self.compute_end_effector_position_from_fk(q)
             print(f"[DEBUG-接触] t={t:.3f}s | is_contact={is_contact} | "
                   f"F_curr={F_curr:.2f}N | z_pos={pos_fk[2]:.4f}m | "
@@ -919,10 +853,10 @@ class WipeTableSimulation:
             # 通过正运动学计算期望姿态（使用当前关节角度和期望位置）
             pos_ref = np.array([0.5, 0.0, 0.3])  # 期望位置
             self.quat_ref = self.compute_desired_orientation_from_fk(q, pos_ref)
-            if self.debug:
+            if should_debug:
                 print(f"[DEBUG-接触建立] t={t:.3f}s | 接触建立！")
         elif not is_contact:
-            if self.contact_t is not None and self.debug:
+            if self.contact_t is not None and should_debug:
                 print(f"[DEBUG-接触丢失] t={t:.3f}s | 接触丢失！之前接触时长={t - self.contact_t:.3f}s")
             self.contact_t = None
 
@@ -984,25 +918,20 @@ class WipeTableSimulation:
             # 存储速度前馈项，将在后面添加到控制力矩中
             self.tau_velocity_feedforward = tau_velocity_feedforward
         else:
-            # 接触后：使用擦拭轨迹
-            t_contact = t - self.contact_t
-            pos_ref, vel_ref, quat_ref = self.generate_wipe_trajectory(t, t_contact)
-
-            quat_ref = self.compute_desired_orientation_from_fk(q, pos_ref)
-
-            # 修改：接触后，Z方向参考位置应该基于实际接触位置
-            # 避免位置误差过大导致位置控制与力控制冲突
-            # 关键：参考位置应该等于或略低于当前位置，避免产生向上的位置控制力
-            if t_contact < 0.5:  # 接触后0.5秒内，逐渐调整参考位置
+            # 接触后：保持当前位置和姿态
+            # 参考位置：基于实际接触位置，避免位置误差过大导致位置控制与力控制冲突
+            pos_ref = pos_curr.copy()
+            if t - self.contact_t < 0.5:  # 接触后0.5秒内，逐渐调整参考位置
                 # 使用实际位置作为参考，等于当前位置（避免位置控制产生Z方向力）
                 pos_ref[2] = pos_curr[2]  # 等于当前位置，避免位置误差
             else:
                 # 稳定后，使用略低于当前位置的参考位置（允许轻微压缩）
                 pos_ref[2] = pos_curr[2] - 0.005  # 略低于当前位置5mm，允许轻微压缩
 
-            # 修改：接触后，姿态应该保持Z轴朝下，而不是通过正运动学计算
-            # 因为正运动学计算的姿态可能不正确（特别是在移动时）
-            # 使用固定的Z轴朝下姿态
+            # 参考速度：保持静止
+            vel_ref = np.array([0.0, 0.0, 0.0])
+
+            # 参考姿态：保持Z轴朝下
             target_orientation = np.array([
                 [1.0, 0.0, 0.0],  # X轴方向
                 [0.0, -1.0, 0.0],  # Y轴方向
@@ -1046,7 +975,7 @@ class WipeTableSimulation:
         )
 
         # ========== DEBUG点2：位置和速度状态 ==========
-        if self.debug and is_contact:
+        if should_debug and is_contact:
             print(f"[DEBUG-位置] t={t:.3f}s | pos_curr={pos_curr} | pos_ref={pos_ref} | "
                   f"X_e={X_e} | V_curr={V_b} | V_ref={vel_ref_6d}")
             print(f"[DEBUG-速度] t={t:.3f}s | V_z={V_b[5]:.4f}m/s | V_e_z={V_e[5]:.4f}m/s | "
@@ -1133,7 +1062,7 @@ class WipeTableSimulation:
             F_force = (np.eye(6) - P) @ F_force_cmd
 
             # ========== DEBUG点3：力控制 ==========
-            if self.debug:
+            if should_debug:
                 print(f"[DEBUG-力控] t={t:.3f}s | F_curr={F_curr:.2f}N | F_desired={self.F_desired:.2f}N | "
                       f"F_e_6d={F_e_6d} | F_e_integral={self.F_e_integral} | "
                       f"F_force_cmd={F_force_cmd} | F_force={F_force}")
@@ -1172,7 +1101,7 @@ class WipeTableSimulation:
         tau = np.clip(tau, -tau_max, tau_max)
 
         # ========== DEBUG点4：控制力矩和wrench ==========
-        if self.debug and is_contact:
+        if should_debug and is_contact:
             # Coriolis项（根据书本公式，不投影）
             print(f"[DEBUG-控制] t={t:.3f}s | F_motion[5]={F_motion[5]:.2f}N | "
                   f"F_force[5]={F_force[5]:.2f}N | eta_tilde[5]={eta_tilde[5]:.2f}N | "
@@ -1209,17 +1138,15 @@ class WipeTableSimulation:
             duration: 仿真时长（秒）
         """
         print("\n" + "=" * 70)
-        print("擦桌子仿真 - 混合力位控制")
+        print("表面力控制仿真 - 混合力位控制")
         print("=" * 70)
         print("\n任务说明:")
         print("  1. 接近表面并建立接触")
         print("  2. 施加法向力（目标：15N）")
-        print("  3. X轴前后擦拭（10秒）")
-        print("  4. Y轴左右擦拭（10秒）")
-        print("  5. 圆形擦拭（持续）")
+        print("  3. 保持接触并维持力控制")
         print("\n控制方法:")
         print("  - 约束：v_z, ω_x, ω_y, ω_z（保持工具与表面平行）")
-        print("  - 运动控制：XY位置（切向擦拭）")
+        print("  - 运动控制：位置和姿态控制")
         print("  - 力控制：Z方向法向力 + 旋转力矩")
         print("=" * 70)
         print("\n[启动仿真...]")
@@ -1256,14 +1183,10 @@ class WipeTableSimulation:
 
                     if t < 2.0:
                         phase = "接近"
-                    elif t < 4.0:
-                        phase = "建立接触"
-                    elif t < 14.0:
-                        phase = "X轴擦拭"
-                    elif t < 24.0:
-                        phase = "Y轴擦拭"
+                    elif is_contact:
+                        phase = "接触中"
                     else:
-                        phase = "圆形擦拭"
+                        phase = "未接触"
 
                     # print(f"[{phase:8}] t={t:5.1f}s | "
                     #       f"位置:[{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}] | "
