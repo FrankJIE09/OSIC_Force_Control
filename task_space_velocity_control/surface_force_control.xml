@@ -22,13 +22,13 @@
     
     <!-- 工作表面：水平平面，位于 z=0.15m 高度 (足够低以避免肘部碰撞) -->
     <body name="work_surface" pos="0.5 0 0.15">
-      <geom name="surface"
-            type="box"
-            size="0.4 0.4 0.02"
-            material="surface_mat"
-            condim="6"
-            friction="0.8 0.02 0.001"
-            solimp="0.98 0.995 0.0001"
+      <geom name="surface" 
+            type="box" 
+            size="0.4 0.4 0.02" 
+            material="surface_mat" 
+            condim="6" 
+            friction="0.8 0.02 0.001" 
+            solimp="0.98 0.995 0.0001" 
             solref="0.005 1" />
     </body>
     

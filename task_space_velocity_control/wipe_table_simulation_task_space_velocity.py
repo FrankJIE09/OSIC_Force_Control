@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """
-任务空间控制仿真 - 基于公式11.37（不使用投影矩阵版本）
-使用 MuJoCo Franka Panda 模型实现任务空间控制
+任务空间位置控制仿真 - 基于公式236（位置控制版本）
+使用 MuJoCo Franka Panda 模型实现任务空间位置控制
 
 控制方法：
-- 任务空间控制（公式11.37）
-- 直接使用任务空间控制律，不使用投影矩阵
+- 任务空间位置控制（公式236，扩展到6DOF）
+- 通过速度积分得到位置命令：θ_cmd = θ_cmd + θ̇ * dt
+- 不需要动力学模型
 
-控制律（公式11.37）：
-τ = J_b^T(θ)[Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e] + η̃(θ, V_b)
+控制律（公式236，6DOF扩展）：
+θ̇ = J^{-1}(θ)[Ẋ_d + K_p X_e]
+θ_cmd = θ_cmd + θ̇ * dt
 
 其中：
-- X_e = log(X^{-1}X_d) 是配置误差
-- V_e = [Ad_{X^{-1}X_d}]V_d - V 是速度误差
-- Λ̃(θ) 是任务空间质量矩阵
-- η̃(θ, V_b) 是任务空间 Coriolis 项
+- X_e = log(X^{-1}X_d) 是配置误差（6维）
+- Ẋ_d 是参考末端执行器速度（6维twist）
+- J(θ) 是雅可比矩阵（6×7）
+- K_p 是比例增益矩阵（6×6）
+- dt 是时间步长
 
 **重要约定（书本第513行约定）**：
 - Twist V = [ω_x, ω_y, ω_z, v_x, v_y, v_z]^T  （角速度在前，线速度在后）
-- Wrench F = [m_x, m_y, m_z, f_x, f_y, f_z]^T （力矩在前，力在后）
-- 所有6维向量：索引0-2为角速度/力矩，索引3-5为线速度/力
+- 所有6维向量：索引0-2为角速度，索引3-5为线速度
 - 雅可比矩阵：J[:3, :]为角速度部分，J[3:, :]为线速度部分
 
 注意：本代码使用书本第513行约定（角速度在前），与MuJoCo标准约定不同。
@@ -32,20 +34,19 @@ import threading
 import time
 from scipy.spatial.transform import Rotation
 
-from dynamics_calculator_wv import DynamicsCalculator
-
 # ROS2 imports
+try:
+    import rclpy
+    from rclpy.node import Node
+    from tf2_ros import TransformBroadcaster
+    from geometry_msgs.msg import TransformStamped
+    ROS2_AVAILABLE = True
+except ImportError:
+    ROS2_AVAILABLE = False
 
-import rclpy
-from rclpy.node import Node
-from tf2_ros import TransformBroadcaster
-from geometry_msgs.msg import TransformStamped
 
-ROS2_AVAILABLE = True
-
-
-class TaskSpaceSimulation:
-    """任务空间控制仿真类（公式11.37）"""
+class TaskSpaceVelocitySimulation:
+    """任务空间位置控制仿真类（公式236，通过速度积分）"""
 
     def __init__(self, model_path: str = "surface_force_control.xml"):
         """
@@ -75,8 +76,14 @@ class TaskSpaceSimulation:
             except:
                 self.joint_dof_indices.append(-1)
 
+        # 获取位置执行器名称（position actuators）
+        self.position_actuator_names = [f"pos_panda_joint{i + 1}" for i in range(7)]
+        
         # 使用默认初始配置
         q_init = self.compute_initial_configuration()
+        
+        # 当前关节位置命令（用于积分）
+        self.q_cmd = q_init.copy()
 
         # 设置初始配置
         for i, name in enumerate(self.joint_names):
@@ -86,24 +93,11 @@ class TaskSpaceSimulation:
 
         mujoco.mj_forward(self.model, self.data)
 
-        # 初始化动力学计算器
-        self.dynamics_calc = DynamicsCalculator(
-            model_path=model_path,
-            body_name="panda_hand",
-            joint_names=self.joint_names
-        )
-        self.dynamics_calc.set_configuration(q_init)
-
         # 控制参数
         self.setup_control_parameters()
 
         # 状态变量
-        self.X_e_integral = np.zeros(6)  # 6维配置误差积分
         self.quat_ref = None  # 参考姿态（四元数）
-
-        # 前馈加速度项计算所需的状态变量
-        self.prev_Ad_Vd = None  # 上一时刻的 [Ad_{X^{-1}X_d}]V_d
-        self.prev_t = None  # 上一时刻的时间
 
         # 调试标志
         self.debug = False  # 设置为True启用调试输出
@@ -126,7 +120,7 @@ class TaskSpaceSimulation:
         if ROS2_AVAILABLE:
             self.init_ros2()
 
-        print("✓ 任务空间控制仿真初始化完成")
+        print("✓ 任务空间位置控制仿真初始化完成")
 
     def init_ros2(self):
         """初始化 ROS2 节点和 TF 广播器"""
@@ -134,7 +128,7 @@ class TaskSpaceSimulation:
             if not rclpy.ok():
                 rclpy.init()
 
-            self.ros2_node = Node('task_space_sim_tf_publisher')
+            self.ros2_node = Node('task_space_velocity_sim_tf_publisher')
             self.tf_broadcaster = TransformBroadcaster(self.ros2_node)
             self.tf_running = True
 
@@ -210,16 +204,50 @@ class TaskSpaceSimulation:
         return q_init
 
     def setup_control_parameters(self):
-        """设置控制参数（公式11.37）"""
+        """设置控制参数（公式236）"""
         # 6维任务空间控制增益（角速度在前）
         # K_p: 位置和姿态比例增益
-        self.K_p = np.diag([10.0, 10.0, 10.0, 5.0, 5.0, 5.0])  # [旋转, 位置]
+        # 速度控制通常只需要比例项
+        self.K_p = np.diag([5.0, 5.0, 5.0, 3.0, 3.0, 3.0])  # [旋转, 位置]
 
-        # K_i: 积分增益
-        self.K_i = np.diag([0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
-
-        # K_d: 微分增益
-        self.K_d = np.diag([1.0, 1.0, 1.0, 8.0, 8.0, 4.0])
+    def compute_adjoint_transformation(self, R, p):
+        """
+        计算 Adjoint 变换矩阵 Ad_{T_world_to_body}（从世界坐标系到 body 坐标系）
+        
+        对于 SE(3) 中的变换 T_world_to_body = (R, p_body)，Adjoint 变换为：
+        Ad_{T_world_to_body} = [R           0        ]
+                               [p_body×R     R       ]
+        
+        其中：
+        - R: 从世界坐标系到 body 坐标系的旋转矩阵
+        - p_body: body 坐标系中的位置（从世界原点看）
+        - p_body = -R @ p_world，其中 p_world 是 body 在世界坐标系中的位置
+        
+        参数:
+            R: 旋转矩阵 (3×3)，从世界坐标系到 body 坐标系
+            p: 位置向量 (3,)，body 在世界坐标系中的位置 p_world
+        
+        返回:
+            Ad: Adjoint 变换矩阵 (6×6)（角速度在前）
+        """
+        # body 坐标系中的位置（从世界原点看）
+        p_body = -R @ p
+        
+        # 计算 p_body 的反对称矩阵
+        p_skew = np.array([
+            [0, -p_body[2], p_body[1]],
+            [p_body[2], 0, -p_body[0]],
+            [-p_body[1], p_body[0], 0]
+        ])
+        
+        # 构建 Adjoint 变换矩阵（角速度在前版本）
+        Ad = np.zeros((6, 6))
+        Ad[:3, :3] = R  # 角速度到角速度
+        Ad[:3, 3:] = np.zeros((3, 3))  # 角速度到线速度（为0）
+        Ad[3:, :3] = p_skew @ R  # 线速度到角速度
+        Ad[3:, 3:] = R  # 线速度到线速度
+        
+        return Ad
 
     def get_jacobian_6x7(self):
         """
@@ -258,11 +286,11 @@ class TaskSpaceSimulation:
             if dof_idx >= 0:
                 J_s[:3, i] = jacr[:, dof_idx]  # 角速度部分 [ω_x, ω_y, ω_z]（索引0-2）
                 J_s[3:, i] = jacp[:, dof_idx]  # 线速度部分 [v_x, v_y, v_z]（索引3-5）
-
+        
         # 2. 获取 body 的位姿（世界坐标系）
         pos_world = np.array(self.data.body("panda_hand").xpos)  # 世界坐标系中的位置
         quat_world = np.array(self.data.body("panda_hand").xquat)  # 世界坐标系中的四元数 [w, x, y, z]
-
+        
         # 将四元数转换为旋转矩阵
         # MuJoCo 四元数格式：[w, x, y, z] -> scipy 格式：[x, y, z, w]
         # xquat 表示从 body 到世界的旋转，所以需要转置得到从世界到 body 的旋转
@@ -270,14 +298,14 @@ class TaskSpaceSimulation:
         rot = Rotation.from_quat(q_scipy)
         R_body_to_world = rot.as_matrix()  # 从 body 到世界的旋转矩阵
         R_world_to_body = R_body_to_world.T  # 从世界到 body 的旋转矩阵（转置）
-
+        
         # 3. 计算 Adjoint 变换（从世界坐标系到 body 坐标系）
         Ad = self.compute_adjoint_transformation(R_world_to_body, pos_world)
-
-        # 4. 转换为物体雅可比：J_b = Ad_{T_world_to_body} J_s
+        
+        # 4. 转换为物体雅可比：J_b = Ad_{T^{-1}} J_s
         J_b = Ad @ J_s
-
-        return J_s, J_b, Ad
+        
+        return J_b
 
     def rotation_matrix_to_quaternion(self, R):
         """
@@ -315,8 +343,7 @@ class TaskSpaceSimulation:
         try:
             rot = Rotation.from_matrix(R)
             omega = rot.as_rotvec()
-            if np.linalg.norm(omega) > 1:
-                print()
+
             theta = np.linalg.norm(omega)
             if theta < 1e-6:
                 omega_skew = np.array([
@@ -347,7 +374,8 @@ class TaskSpaceSimulation:
 
     def compute_configuration_error(self, pos_curr, quat_curr, pos_ref, quat_ref):
         """
-        计算配置误差 X_e = log(X^{-1} X_d) - 公式11.37
+        计算配置误差 X_e = log(X^{-1} X_d) - 公式236
+
         使用 SE(3) 的 4x4 变换矩阵直接计算
 
         其中：
@@ -394,7 +422,7 @@ class TaskSpaceSimulation:
             T_curr_inv[:3, 3] = -R_curr.T @ pos_curr
 
             # 计算相对变换：T_err = T_curr^{-1} @ T_ref
-            T_err = T_curr @ np.linalg.inv(T_ref)
+            T_err = T_curr_inv @ T_ref
 
             # 提取旋转和平移部分
             R_err = T_err[:3, :3]
@@ -432,209 +460,20 @@ class TaskSpaceSimulation:
         except:
             return np.zeros(3)
 
-    def compute_velocity_error(self, pos_curr, quat_curr, pos_ref, quat_ref, vel_ref, V_curr):
-        """
-        计算速度误差 V_e = [Ad_{X^{-1}X_d}]V_d - V - 公式11.37
-
-        其中：
-        - V_d 是参考速度（在参考坐标系X_d中表示）
-        - V 是当前速度（在当前坐标系X中表示）
-        - [Ad_{X^{-1}X_d}] 将V_d从参考坐标系转换到当前坐标系
-
-        参数:
-            pos_curr: 当前位置 (3,)
-            quat_curr: 当前姿态四元数 (4,)
-            pos_ref: 参考位置 (3,)
-            quat_ref: 参考姿态四元数 (4,)
-            vel_ref: 参考速度 (6,) [ω_ref, v_ref]（在参考坐标系中，角速度在前）
-            V_curr: 当前速度 (6,) [ω_curr, v_curr]（在当前坐标系中，角速度在前）
-
-        返回:
-            V_e: 6维速度误差 (6,)
-        """
-        try:
-            q_curr_scipy = np.array([quat_curr[1], quat_curr[2], quat_curr[3], quat_curr[0]])
-            q_ref_scipy = np.array([quat_ref[1], quat_ref[2], quat_ref[3], quat_ref[0]])
-
-            rot_curr = Rotation.from_quat(q_curr_scipy)
-            rot_ref = Rotation.from_quat(q_ref_scipy)
-
-            R_curr = rot_curr.as_matrix()
-            R_ref = rot_ref.as_matrix()
-
-            # 计算 X^{-1} X_d 的旋转部分：R_curr^T R_ref
-            R_err = R_curr.T @ R_ref
-
-            # 计算 X^{-1} X_d 的平移部分：R_curr^T (p_ref - p_curr)
-            p_err = R_curr.T @ (pos_ref - pos_curr)
-
-            # 计算Adjoint变换 Ad_{X^{-1}X_d}
-            Ad = self.compute_adjoint_transformation(R_err, p_err)
-
-            # 如果vel_ref只有3维（只有平移速度），扩展为6维（角速度在前）
-            if len(vel_ref) == 3:
-                vel_ref_6d = np.concatenate([np.zeros(3), vel_ref])
-            else:
-                vel_ref_6d = vel_ref
-
-            # 计算速度误差：V_e = [Ad_{X^{-1}X_d}]V_d - V
-            V_e = Ad @ vel_ref_6d - V_curr
-
-            return V_e
-        except:
-            if len(vel_ref) == 3:
-                V_e = np.concatenate([-V_curr[:3], vel_ref - V_curr[3:]])
-            else:
-                V_e = vel_ref - V_curr
-            return V_e
-
-    def skew_symmetric(self, v):
-        """
-        生成三维向量的反对称矩阵（叉积矩阵）
-        输入: v - 3x1向量 [x, y, z]
-        输出: 3x3反对称矩阵 [v]×
-        """
-        v = np.array(v).flatten()
-        return np.array([
-            [0, -v[2], v[1]],
-            [v[2], 0, -v[0]],
-            [-v[1], v[0], 0]
-        ])
-
-    def se3_adjoint(self, T):
-        """
-        计算SE(3)变换矩阵的伴随表示
-        输入: T - 4x4 SE(3)变换矩阵 [[R, t], [0, 1]]
-        输出: Ad(T) - 6x6伴随矩阵 [[R, [t]×R], [0, R]]
-
-        其中：
-        - R 是3x3旋转矩阵
-        - t 是3x1平移向量
-        - [t]× 是t的反对称矩阵
-        """
-        # 验证输入矩阵尺寸
-        T = np.array(T)
-        if T.shape != (4, 4):
-            raise ValueError("输入必须是4x4矩阵")
-
-        # 提取旋转矩阵和平移向量
-        R = T[:3, :3]
-        t = T[:3, 3]
-
-        # 生成平移向量的反对称矩阵
-        t_skew = self.skew_symmetric(t)
-
-        # 构建6x6伴随矩阵（角速度在前版本）
-        Ad = np.zeros((6, 6))
-        Ad[:3, :3] = R  # 左上块：R
-        Ad[:3, 3:] = t_skew @ R  # 右上块：[t]×R
-        Ad[3:, 3:] = R  # 右下块：R
-        # 左下块默认为0
-
-        return Ad
-
-    def compute_adjoint_transformation(self, R, p):
-        """
-        计算 Adjoint 变换矩阵（兼容旧接口）
-        
-        参数:
-            R: 旋转矩阵 (3×3)
-            p: 位置向量 (3,)
-        
-        返回:
-            Ad: Adjoint 变换矩阵 (6×6)（角速度在前）
-        """
-        # 构建4x4 SE(3)变换矩阵
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = p
-        
-        # 使用se3_adjoint计算
-        return self.se3_adjoint(T)
-
-    def compute_desired_acceleration_feedforward(self, pos_ref, quat_ref, vel_ref, pos_curr, quat_curr, V_curr, dt, t):
-        """
-        计算前馈加速度项：d/dt([Ad_{X^{-1}X_d}]V_d)
-
-        具体计算步骤：
-        1. 计算 X^{-1}X_d 的旋转和平移部分
-        2. 计算 Adjoint 矩阵 Ad_{X^{-1}X_d}
-        3. 计算 [Ad_{X^{-1}X_d}]V_d
-        4. 通过数值微分计算 d/dt([Ad_{X^{-1}X_d}]V_d)
-
-        参数:
-            pos_ref, quat_ref: 参考位姿
-            vel_ref: 参考速度 (3,) 或 (6,)
-            pos_curr, quat_curr: 当前位姿
-            V_curr: 当前任务空间速度 (6,)
-            dt: 时间步长
-            t: 当前时间
-
-        返回:
-            V_dot_desired: 期望加速度 (6,) = d/dt([Ad_{X^{-1}X_d}]V_d)
-        """
-        try:
-            # 将参考速度扩展为6维（角速度在前）
-            if len(vel_ref) == 3:
-                vel_ref_6d = np.concatenate([np.zeros(3), vel_ref])
-            else:
-                vel_ref_6d = vel_ref.copy()
-
-            # 转换为旋转矩阵
-            q_curr_scipy = np.array([quat_curr[1], quat_curr[2], quat_curr[3], quat_curr[0]])
-            q_ref_scipy = np.array([quat_ref[1], quat_ref[2], quat_ref[3], quat_ref[0]])
-
-            rot_curr = Rotation.from_quat(q_curr_scipy)
-            rot_ref = Rotation.from_quat(q_ref_scipy)
-
-            R_curr = rot_curr.as_matrix()
-            R_ref = rot_ref.as_matrix()
-
-            # 计算 X^{-1}X_d 的旋转部分：R_curr^T R_ref
-            R_err = R_curr.T @ R_ref
-
-            # 计算 X^{-1}X_d 的平移部分：R_curr^T (p_ref - p_curr)
-            p_err = R_curr.T @ (pos_ref - pos_curr)
-
-            # 计算 Adjoint 变换 Ad_{X^{-1}X_d}
-            Ad = self.compute_adjoint_transformation(R_err, p_err)
-
-            # 计算 [Ad_{X^{-1}X_d}]V_d
-            Ad_Vd = Ad @ vel_ref_6d
-
-            # 计算时间导数：d/dt([Ad_{X^{-1}X_d}]V_d)
-            if self.prev_Ad_Vd is not None and self.prev_t is not None and dt > 0:
-                # 数值微分
-                V_dot_desired = (Ad_Vd - self.prev_Ad_Vd) / dt
-            else:
-                # 第一次调用，无法计算导数，返回零
-                V_dot_desired = np.zeros(6)
-
-            # 更新上一时刻的值
-            self.prev_Ad_Vd = Ad_Vd.copy()
-            self.prev_t = t
-
-            return V_dot_desired
-
-        except Exception as e:
-            if self.debug:
-                print(f"⚠ 前馈加速度计算错误: {e}")
-            return np.zeros(6)
-
     def control_step(self, t, dt=0.002):
         """
-        执行一步任务空间控制 - 公式11.37
+        执行一步任务空间位置控制 - 公式236（6DOF扩展）
 
-        控制律（公式11.37）：
-        τ = J_b^T(θ)[Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e] + η̃(θ, V_b)
+        控制律（公式236，6DOF扩展）：
+        θ̇ = J^{-1}(θ)[Ẋ_d + K_p X_e]
+        θ_cmd = θ_cmd + θ̇ * dt
 
         其中：
-        - J_b^T(θ): 末端执行器坐标系中的雅可比转置
-        - Λ̃(θ): 任务空间质量矩阵
-        - η̃(θ, V_b): 任务空间 Coriolis 项（末端执行器坐标系）
-        - V_b: 末端执行器坐标系中的速度
-        - X_e = log(X^{-1}X_d): 配置误差
-        - V_e = [Ad_{X^{-1}X_d}]V_d - V: 速度误差
+        - J(θ): 雅可比矩阵（6×7）
+        - Ẋ_d: 参考末端执行器速度（6维twist）
+        - X_e = log(X^{-1}X_d): 配置误差（6维）
+        - K_p: 比例增益矩阵（6×6）
+        - dt: 时间步长
 
         参数:
             t: 当前时间
@@ -656,37 +495,22 @@ class TaskSpaceSimulation:
                 qdot[i] = self.data.qvel[dof_idx]
 
         # 计算雅可比矩阵
-        Js, Jb, _= self.get_jacobian_6x7()
-
-        # 计算任务空间速度（末端执行器坐标系 {b}）
-        # V_b = [ω_x, ω_y, ω_z, v_x, v_y, v_z]^T
-        V_b = Jb @ qdot
-
-        # 更新动力学计算器状态
-        self.dynamics_calc.set_configuration(q, qdot)
+        J = self.get_jacobian_6x7()
 
         # 生成参考轨迹
         # 目标位置：在表面上方
         z_des = 0.4 - min(t / 2.0, 1.0) * 0.25  # 从0.4m降到0.15m
-        pos_ref = np.array([0.4, 0.0, 0.4])
+        pos_ref = np.array([0.4, 0.0, 0.5])
 
-        # 参考速度：Z方向下降速度
-        vel_ref = np.array([0.0, 0.0, -0.25 / 2.0 if t < 2.0 else 0.0])
+        # 参考速度：Z方向下降速度（6维twist，角速度在前）
+        vel_ref_linear = np.array([0.0, 0.0, -0.25 / 2.0 if t < 2.0 else 0.0])
+        vel_ref_angular = np.zeros(3)  # 无角速度
+        vel_ref_6d = np.concatenate([vel_ref_angular, vel_ref_linear])  # [ω, v]
 
         # 期望姿态：Z轴朝下
         target_orientation = Rotation.from_euler("xyz", [3.14, 0, 0]).as_matrix()
         quat_ref = self.rotation_matrix_to_quaternion(target_orientation)
         self.quat_ref = quat_ref
-
-        # 计算动力学量
-        Lambda_robot = self.dynamics_calc.compute_task_space_mass_matrix(
-            q, task_space_dim=6, use_pseudoinverse=True, damping=1e-6
-        )
-
-        # 计算任务空间 Coriolis 项 η̃(θ, V_b)
-        eta_tilde = self.dynamics_calc.compute_task_space_coriolis(
-            q, V_b, task_space_dim=6, use_pseudoinverse=True, damping=1e-6
-        )
 
         # ========== 更新 TF 发布数据 ==========
         if ROS2_AVAILABLE and self.tf_running:
@@ -696,70 +520,54 @@ class TaskSpaceSimulation:
                 self.pos_ref = pos_ref.copy()
                 self.quat_ref_tf = quat_ref.copy()
 
-        # ========== 计算配置误差和速度误差 ==========
+        # ========== 计算配置误差 ==========
         # 计算6维配置误差：X_e = log(X^{-1} X_d)
         X_e = self.compute_configuration_error(
             pos_curr, quat_curr, pos_ref, quat_ref
         )
 
-
-        # time.sleep(0.1)
-        # 计算6维速度误差：V_e = [Ad_{X^{-1}X_d}]V_d - V
-        vel_ref_6d = vel_ref if len(vel_ref) == 6 else np.concatenate([np.zeros(3), vel_ref])
-        V_e = self.compute_velocity_error(
-            pos_curr, quat_curr, pos_ref, quat_ref, vel_ref_6d, V_b
-        )
-
-        # 更新积分项（6维）
-        self.X_e_integral += X_e * dt
-        self.X_e_integral = np.clip(self.X_e_integral, -0.02, 0.02)
-
-        # ========== 计算前馈加速度项 ==========
-        # 计算 d/dt([Ad_{X^{-1}X_d}]V_d)
-        V_dot_desired = self.compute_desired_acceleration_feedforward(
-            pos_ref, quat_ref, vel_ref, pos_curr, quat_curr, V_b, dt, t
-        )
-
-        # ========== 任务空间控制律（公式11.37）==========
-        # 公式11.37：τ = J_b^T(θ)[Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e] + η̃(θ, V_b)
+        # ========== 任务空间速度控制律（公式236，6DOF扩展）==========
+        # 公式236：θ̇ = J^{-1}(θ)[Ẋ_d + K_p X_e]
         # 
-        # 注意：η̃(θ, V_b) 是任务空间的 Coriolis 项（6维），在公式中位于括号外。
-        # 但为了维度匹配，需要将 η̃ 也通过 J_b^T 转换到关节空间。
-        # 实际上等价于：τ = J_b^T(θ)[... + η̃(θ, V_b)]
-        # 
-        # 任务空间控制力：F_cmd = Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e
-        F_cmd = (
-                Lambda_robot @ V_dot_desired +
-                -self.K_p @ X_e
-            # -self.K_i @ self.X_e_integral
-            # -self.K_d @ V_e
-        )
+        # 计算期望任务空间速度
+        X_dot_desired = vel_ref_6d + self.K_p @ X_e
 
-        # ========== 转换为关节力矩 ==========
-        # 公式11.37：τ = J_b^T(θ) F_cmd + J_b^T(θ) η̃(θ, V_b)
-        # 等价于：τ = J_b^T(θ)[F_cmd + η̃(θ, V_b)]
-        # 为了维度匹配，将 η̃ 也通过 J^T 转换
-        tau = Js.T @ Lambda_robot@ F_cmd + Js.T @ eta_tilde
+        # 使用伪逆计算关节速度（处理冗余机器人）
+        # J^+ = J^T (J J^T)^{-1} 或使用 SVD 伪逆
+        J_pinv = np.linalg.pinv(J, rcond=1e-6)
 
-        # 力矩限制
-        tau_max = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
-        tau = np.clip(tau, -tau_max, tau_max)
+        # 计算期望关节速度
+        qdot_cmd = J_pinv @ X_dot_desired
+
+        # 速度限制（rad/s）
+        qdot_max = np.array([2.0, 2.0, 2.0, 2.0, 2.5, 2.5, 2.5], dtype=float)
+        qdot_cmd = np.clip(qdot_cmd, -qdot_max, qdot_max)
+
+        # ========== 位置控制：速度积分得到位置命令 ==========
+        # 使用速度*dt+theta的方式：q_cmd = q_cmd + qdot_cmd * dt
+        self.q_cmd = self.q_cmd + qdot_cmd * dt
+        
+        # 关节位置限制（根据关节范围）
+        q_min = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973])
+        q_max = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973])
+        self.q_cmd = np.clip(self.q_cmd, q_min, q_max)
 
         # ========== DEBUG输出 ==========
         should_debug = self.debug and (t - self.last_debug_time >= 2.0)
         if should_debug:
             self.last_debug_time = t
             print(f"[DEBUG] t={t:.3f}s | pos_curr={pos_curr} | pos_ref={pos_ref}")
-            print(f"  X_e={X_e} | V_e={V_e}")
-            print(f"  F_cmd={F_cmd} | tau={tau}")
+            print(f"  X_e={X_e} | X_dot_desired={X_dot_desired}")
+            print(f"  qdot_cmd={qdot_cmd} | q_cmd={self.q_cmd}")
 
-        # 应用控制
-        for i, name in enumerate(self.joint_names):
+        # 应用控制（位置控制）
+        for i, name in enumerate(self.position_actuator_names):
             try:
                 ctrl_id = self.model.actuator(name).id
-                self.data.actuator(ctrl_id).ctrl = float(tau[i])
-            except:
-                pass
+                self.data.actuator(ctrl_id).ctrl = float(self.q_cmd[i])
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠ 执行器 {name} 控制失败: {e}")
 
     def run(self, duration=30.0):
         """
@@ -769,11 +577,12 @@ class TaskSpaceSimulation:
             duration: 仿真时长（秒）
         """
         print("\n" + "=" * 70)
-        print("任务空间控制仿真 - 公式11.37")
+        print("任务空间位置控制仿真 - 公式236（6DOF扩展）")
         print("=" * 70)
         print("\n控制方法:")
-        print("  - 任务空间控制（不使用投影矩阵）")
-        print("  - 控制律：τ = J_b^T(θ)[Λ̃(θ)d/dt([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i∫X_e + K_d V_e] + η̃(θ, V_b)")
+        print("  - 任务空间位置控制（通过速度积分）")
+        print("  - 控制律：θ̇ = J^{-1}(θ)[Ẋ_d + K_p X_e]")
+        print("  - 位置命令：θ_cmd = θ_cmd + θ̇ * dt")
         print("=" * 70)
         print("\n[启动仿真...]")
 
@@ -820,6 +629,7 @@ if __name__ == "__main__":
     # 注意：要使用 ROS2 TF 发布功能，需要先 source ROS2 环境：
     # source /opt/ros/humble/setup.bash  # 或对应版本的路径
 
-    sim = TaskSpaceSimulation(model_path="surface_force_control_b.xml")
+    sim = TaskSpaceVelocitySimulation(model_path="surface_force_control.xml")
     sim.debug = False  # 设置为 True 启用调试输出
     sim.run(duration=30.0)
+

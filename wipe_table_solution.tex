@@ -1,0 +1,309 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\title{擦桌子任务解答：混合力位控制公式推导}
+\author{解答}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{约束矩阵 $A(\theta)$（公式11.57）}
+
+对于表面接触任务，约束条件为：
+\begin{itemize}
+    \item 法向平移：$v_z = 0$
+    \item 所有旋转：$\omega_x = \omega_y = \omega_z = 0$
+\end{itemize}
+
+约束矩阵 $A(\theta) \in \mathbb{R}^{4 \times 6}$ 定义为：
+\begin{equation}
+A(\theta) V = 0
+\end{equation}
+
+其中 $V = [v_x, v_y, v_z, \omega_x, \omega_y, \omega_z]^T$ 是末端执行器坐标系中的twist。
+
+对于完全约束（4个约束），约束矩阵为：
+\begin{equation}
+A = \begin{bmatrix}
+0 & 0 & 1 & 0 & 0 & 0 \\  % v_z = 0
+0 & 0 & 0 & 1 & 0 & 0 \\  % ω_x = 0
+0 & 0 & 0 & 0 & 1 & 0 \\  % ω_y = 0
+0 & 0 & 0 & 0 & 0 & 1     % ω_z = 0
+\end{bmatrix}
+\end{equation}
+
+即：
+\begin{equation}
+A = \begin{bmatrix}
+\mathbf{0}_{1 \times 2} & 1 & \mathbf{0}_{1 \times 3} \\
+\mathbf{0}_{3 \times 3} & \mathbf{I}_3
+\end{bmatrix}
+\end{equation}
+
+\section{投影矩阵 $P(\theta)$（公式11.63）}
+
+投影矩阵将任务空间wrench投影到运动子空间（切向运动方向）：
+\begin{equation}
+P = I - A^T(A\Lambda^{-1}A^T)^{-1}A\Lambda^{-1}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $I \in \mathbb{R}^{6 \times 6}$：单位矩阵
+    \item $\Lambda(\theta) \in \mathbb{R}^{6 \times 6}$：任务空间质量矩阵
+    \item $A \in \mathbb{R}^{4 \times 6}$：约束矩阵
+\end{itemize}
+
+投影矩阵的性质：
+\begin{itemize}
+    \item $P$ 的秩为 $n-k = 6-4 = 2$（运动子空间维度）
+    \item $I-P$ 的秩为 $k = 4$（力子空间维度）
+    \item $P$ 和 $I-P$ 正交：$P(I-P) = 0$
+\end{itemize}
+
+\section{配置误差 $X_e$（SE(3) log映射）}
+
+配置误差定义为：
+\begin{equation}
+X_e = \log(X^{-1} X_d)
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $X = (R_{\text{curr}}, p_{\text{curr}})$：当前位姿
+    \item $X_d = (R_{\text{ref}}, p_{\text{ref}})$：参考位姿
+    \item $\log: SE(3) \to \mathfrak{se}(3)$：SE(3)群的log映射
+\end{itemize}
+
+计算步骤：
+\begin{enumerate}
+    \item 计算相对变换：$X_{\text{err}} = X^{-1} X_d = (R_{\text{curr}}^T R_{\text{ref}}, R_{\text{curr}}^T(p_{\text{ref}} - p_{\text{curr}}))$
+    \item 提取旋转矩阵：$R_{\text{err}} = R_{\text{curr}}^T R_{\text{ref}}$
+    \item 提取平移向量：$p_{\text{err}} = R_{\text{curr}}^T(p_{\text{ref}} - p_{\text{curr}})$
+    \item 计算旋转部分：$\omega = \log(R_{\text{err}})$（旋转向量，轴角表示）
+    \item 计算平移部分：$v = V^{-1}(\omega) p_{\text{err}}$，其中
+    \begin{equation}
+    V^{-1}(\omega) = I - \frac{1-\cos\theta}{\theta^2}[\omega]_\times + \frac{\theta-\sin\theta}{\theta^3}[\omega]_\times^2
+    \end{equation}
+    当 $\theta = \|\omega\|$ 很小时，使用近似：$V^{-1} \approx I - \frac{1}{2}[\omega]_\times$
+    \item 组合为6维twist：$X_e = [v^T, \omega^T]^T$
+\end{enumerate}
+
+\section{速度误差 $V_e$}
+
+速度误差定义为：
+\begin{equation}
+V_e = [Ad_{X^{-1}X_d}]V_d - V
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $V_d = [v_d^T, \omega_d^T]^T$：参考速度（在参考坐标系中表示）
+    \item $V = [v^T, \omega^T]^T$：当前速度（在当前坐标系中表示）
+    \item $[Ad_{X^{-1}X_d}]$：Adjoint变换，将$V_d$从参考坐标系转换到当前坐标系
+\end{itemize}
+
+Adjoint变换矩阵：
+\begin{equation}
+Ad_X = \begin{bmatrix}
+R & 0 \\
+[p]_\times R & R
+\end{bmatrix}
+\end{equation}
+
+其中 $[p]_\times$ 是位置向量 $p$ 的反对称矩阵：
+\begin{equation}
+[p]_\times = \begin{bmatrix}
+0 & -p_z & p_y \\
+p_z & 0 & -p_x \\
+-p_y & p_x & 0
+\end{bmatrix}
+\end{equation}
+
+对于 $X_{\text{err}} = X^{-1} X_d = (R_{\text{err}}, p_{\text{err}})$：
+\begin{equation}
+[Ad_{X^{-1}X_d}] = \begin{bmatrix}
+R_{\text{err}} & 0 \\
+[p_{\text{err}}]_\times R_{\text{err}} & R_{\text{err}}
+\end{bmatrix}
+\end{equation}
+
+\section{任务空间质量矩阵 $\tilde{\Lambda}(\theta)$}
+
+任务空间质量矩阵定义为：
+\begin{equation}
+\tilde{\Lambda}(\theta) = (J_b(\theta) M^{-1}(\theta) J_b^T(\theta))^{-1}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $M(\theta) \in \mathbb{R}^{7 \times 7}$：关节空间质量矩阵
+    \item $J_b(\theta) \in \mathbb{R}^{6 \times 7}$：末端执行器坐标系中的雅可比矩阵
+\end{itemize}
+
+或者使用伪逆形式（当$J_b$不是方阵时）：
+\begin{equation}
+\tilde{\Lambda}(\theta) = J_b^{-T}(\theta) M(\theta) J_b^{-1}(\theta)
+\end{equation}
+
+其中 $J_b^{-1} = (J_b^T J_b + \epsilon I)^{-1} J_b^T$ 是阻尼伪逆。
+
+\section{任务空间Coriolis项 $\tilde{\eta}(\theta, V_b)$}
+
+\subsection{代码中实际使用的公式（公式8.91）}
+
+代码中实际使用的是公式8.91：
+\begin{equation}
+\tilde{\eta}(\theta, V_b) = J_b^{-T}(\theta) h(\theta, J_b^{-1}V_b) - \Lambda(\theta) \dot{J}_b(\theta) J_b^{-1}(\theta) V_b \tag{8.91}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $h(\theta, \dot{\theta}) = C(\theta, \dot{\theta}) \dot{\theta} + g(\theta)$：关节空间的科里奥利、向心力和重力项
+    \item $\Lambda(\theta) = J_b^{-T}(\theta) M(\theta) J_b^{-1}(\theta)$：任务空间质量矩阵
+    \item $\dot{J}_b(\theta)$：雅可比矩阵的时间导数
+    \item $V_b = J_b(\theta) \dot{\theta}$：末端执行器坐标系中的速度
+    \item $\dot{\theta} = J_b^{-1}(\theta) V_b$：从任务空间速度反算的关节速度
+\end{itemize}
+
+\subsection{另一种等价形式}
+
+另一种常见的等价形式为：
+\begin{equation}
+\tilde{\eta}(\theta, V_b) = J_b^{-T}(\theta) \left(C(\theta, \dot{\theta}) \dot{\theta} + g(\theta) - M(\theta) J_b^{-1}(\theta) \dot{J}_b(\theta) V_b\right)
+\end{equation}
+
+\subsection{两种形式的等价性证明}
+
+将公式8.91展开：
+\begin{align}
+\tilde{\eta}(\theta, V_b) &= J_b^{-T}(\theta) h(\theta, J_b^{-1}V_b) - \Lambda(\theta) \dot{J}_b(\theta) J_b^{-1}(\theta) V_b \\
+&= J_b^{-T}(\theta) \left(C(\theta, \dot{\theta}) \dot{\theta} + g(\theta)\right) - \Lambda(\theta) \dot{J}_b(\theta) J_b^{-1}(\theta) V_b
+\end{align}
+
+由于 $\Lambda(\theta) = J_b^{-T}(\theta) M(\theta) J_b^{-1}(\theta)$，代入得：
+\begin{align}
+\tilde{\eta}(\theta, V_b) &= J_b^{-T}(\theta) \left(C(\theta, \dot{\theta}) \dot{\theta} + g(\theta)\right) - J_b^{-T}(\theta) M(\theta) J_b^{-1}(\theta) \dot{J}_b(\theta) J_b^{-1}(\theta) V_b \\
+&= J_b^{-T}(\theta) \left(C(\theta, \dot{\theta}) \dot{\theta} + g(\theta) - M(\theta) J_b^{-1}(\theta) \dot{J}_b(\theta) V_b\right)
+\end{align}
+
+因此两种形式等价。
+
+\subsection{计算步骤（代码实现）}
+
+代码中的计算步骤：
+\begin{enumerate}
+    \item 计算雅可比矩阵：$J_b(\theta)$
+    \item 计算雅可比逆：$J_b^{-1}(\theta)$（使用伪逆或直接求逆）
+    \item 计算关节速度：$\dot{\theta} = J_b^{-1}(\theta) V_b$
+    \item 计算$h(\theta, \dot{\theta}) = C(\theta, \dot{\theta}) \dot{\theta} + g(\theta)$
+    \item 计算雅可比时间导数：$\dot{J}_b(\theta)$
+    \item 计算任务空间质量矩阵：$\Lambda(\theta)$
+    \item 第一项：$J_b^{-T}(\theta) h(\theta, \dot{\theta})$
+    \item 第二项：$\Lambda(\theta) \dot{J}_b(\theta) J_b^{-1}(\theta) V_b$
+    \item 组合：$\tilde{\eta} = \text{第一项} - \text{第二项}$
+\end{enumerate}
+
+\subsection{简化形式（忽略雅可比时间导数项）}
+
+在某些应用中，可以忽略雅可比时间导数项，得到简化形式：
+\begin{equation}
+\tilde{\eta}(\theta, V_b) \approx J_b^{-T}(\theta) \left(C(\theta, \dot{\theta}) \dot{\theta} + g(\theta)\right)
+\end{equation}
+
+但代码中使用了完整形式（公式8.91），包含雅可比时间导数项，以获得更精确的动力学补偿。
+
+\section{完整的控制律 $\tau$（公式11.61）}
+
+混合运动-力控制律为：
+\begin{equation}
+\begin{split}
+\tau = J_b^T(\theta)\Bigg[&P(\theta)\left(\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i\int_0^t X_e(\tau)d\tau + K_d V_e\right) \\
+&+ (I - P(\theta))\left(F_d + K_{fp}F_e + K_{fi}\int_0^t F_e(\tau)d\tau\right) + \tilde{\eta}(\theta, V_b)\Bigg]
+\end{split}
+\end{equation}
+
+其中各项说明：
+
+\subsection{运动控制部分}
+\begin{equation}
+F_{\text{motion}} = P(\theta)\left(\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i\int_0^t X_e(\tau)d\tau + K_d V_e\right)
+\end{equation}
+
+包含：
+\begin{itemize}
+    \item 前馈加速度项：$\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d)$
+    \item 比例项：$K_p X_e$（$K_p \in \mathbb{R}^{6 \times 6}$）
+    \item 积分项：$K_i\int_0^t X_e(\tau)d\tau$（$K_i \in \mathbb{R}^{6 \times 6}$）
+    \item 微分项：$K_d V_e$（$K_d \in \mathbb{R}^{6 \times 6}$）
+\end{itemize}
+
+\subsection{力控制部分}
+\begin{equation}
+F_{\text{force}} = (I - P(\theta))\left(F_d + K_{fp}F_e + K_{fi}\int_0^t F_e(\tau)d\tau\right)
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $F_d = [0, 0, -15, 0, 0, 0]^T$：期望wrench（仅Z方向法向力）
+    \item $F_e = F_d - F_{\text{curr}}$：力误差（$F_{\text{curr}}$是当前测量的wrench）
+    \item $K_{fp} \in \mathbb{R}^{6 \times 6}$：力比例增益矩阵
+    \item $K_{fi} \in \mathbb{R}^{6 \times 6}$：力积分增益矩阵
+\end{itemize}
+
+\subsection{动力学补偿}
+\begin{equation}
+\tilde{\eta}(\theta, V_b) = J_b^{-T}(\theta) \left(C(\theta, \dot{\theta}) \dot{\theta} + g(\theta)\right)
+\end{equation}
+
+补偿任务空间中的Coriolis和重力效应。
+
+\section{增益矩阵设计}
+
+\subsection{运动控制增益}
+\begin{equation}
+K_p = \begin{bmatrix}
+K_{p,\text{pos}} & 0 \\
+0 & K_{p,\text{rot}}
+\end{bmatrix}, \quad
+K_i = \begin{bmatrix}
+K_{i,\text{pos}} & 0 \\
+0 & K_{i,\text{rot}}
+\end{bmatrix}, \quad
+K_d = \begin{bmatrix}
+K_{d,\text{pos}} & 0 \\
+0 & K_{d,\text{rot}}
+\end{bmatrix}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $K_{p,\text{pos}} = \text{diag}(1000, 1000, 500)$：位置增益
+    \item $K_{p,\text{rot}} = \text{diag}(50, 50, 30)$：旋转增益
+    \item $K_{i,\text{pos}} = \text{diag}(20, 20, 10)$：位置积分增益
+    \item $K_{d,\text{pos}} = \text{diag}(80, 80, 40)$：位置微分增益
+\end{itemize}
+
+\subsection{力控制增益}
+\begin{equation}
+K_{fp} = \text{diag}(0.5, 0.5, 1.0, 10.0, 10.0, 5.0), \quad
+K_{fi} = \text{diag}(0.1, 0.1, 0.2, 2.0, 2.0, 1.0)
+\end{equation}
+
+\section{控制律的物理意义}
+
+\begin{itemize}
+    \item \textbf{投影矩阵$P$}：将运动控制wrench投影到切向运动子空间（XY平面），不影响约束方向（Z方向和旋转）
+    \item \textbf{投影矩阵$I-P$}：将力控制wrench投影到约束方向（Z方向和旋转），不影响切向运动
+    \item \textbf{解耦性}：由于$P$和$I-P$正交，运动控制和力控制相互解耦，可以独立设计
+    \item \textbf{稳定性}：每个子空间上的控制器继承各自子空间的误差动力学和稳定性分析
+\end{itemize}
+
+\end{document}
+

@@ -1,0 +1,306 @@
+\documentclass[UTF8,12pt]{ctexart}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\geometry{a4paper, margin=2.5cm}
+
+\title{擦桌子仿真 - 混合力位控制算法说明}
+\author{基于书本公式11.61实现}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{概述}
+
+本文档描述擦桌子仿真中使用的混合运动-力控制算法。该算法基于书本公式11.61，实现了在约束环境下的混合控制策略。
+
+\section{核心控制公式}
+
+\subsection{完整公式（书本公式11.61）}
+
+混合运动-力控制律的完整形式为：
+
+\begin{equation}
+\begin{split}
+\tau = J_b^T(\theta)\Bigg[&P(\theta)\left(\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d) + K_p X_e + K_i\int_0^t X_e(t)dt + K_d V_e\right) \\
+&+ (I - P(\theta))\left(F_d + K_{fp}F_e + K_{fi}\int_0^t F_e(t)dt\right) + \tilde{\eta}(\theta, V_b)\Bigg],
+\end{split}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\tau \in \mathbb{R}^n$：关节力矩向量
+    \item $J_b(\theta) \in \mathbb{R}^{6 \times n}$：末端执行器坐标系$\{b\}$中的雅可比矩阵
+    \item $P(\theta) \in \mathbb{R}^{6 \times 6}$：投影矩阵（公式11.63）
+    \item $\tilde{\Lambda}(\theta) \in \mathbb{R}^{6 \times 6}$：任务空间质量矩阵
+    \item $\tilde{\eta}(\theta, V_b) \in \mathbb{R}^6$：任务空间Coriolis项（末端执行器坐标系）
+    \item $V_b \in \mathbb{R}^6$：末端执行器坐标系中的速度（twist）
+    \item $X_e, V_e$：位置和速度误差
+    \item $F_e$：力误差
+\end{itemize}
+
+\subsection{简化实现}
+
+在实际代码实现中，对公式进行了以下简化：
+
+\subsubsection{简化1：前馈加速度项}
+
+\textbf{完整形式}：
+\begin{equation}
+\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d)
+\end{equation}
+
+\textbf{简化说明}：
+\begin{itemize}
+    \item \textbf{Adjoint变换}：$[Ad_{X^{-1}X_d}]$ 表示从期望坐标系到当前坐标系的Adjoint变换
+    \item \textbf{加速度项}：$\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d)$ 需要计算期望速度的时间导数
+    \item \textbf{简化处理}：对于平滑轨迹，此项通常很小，代码中简化为：
+    \begin{equation}
+    \tilde{\Lambda}(\theta) \cdot \mathbf{0} = \mathbf{0}
+    \end{equation}
+    即直接忽略前馈加速度项
+\end{itemize}
+
+\textbf{代码实现}（第872-879行）：
+\begin{lstlisting}[language=Python, basicstyle=\small]
+# 计算前馈加速度项（简化实现：对于平滑轨迹，此项可忽略或很小）
+V_dot_desired = self.compute_desired_acceleration_feedforward(
+    pos_ref, self.quat_ref, vel_ref, pos_curr, quat_curr, V_b, dt
+)
+
+# 前馈项：Λ̃(θ) * V̇_d（简化：如果加速度项很小，可以忽略）
+# 对于大多数平滑轨迹，此项可以忽略
+feedforward_acceleration = Lambda @ V_dot_desired
+\end{lstlisting}
+
+\textbf{简化原因}：
+\begin{enumerate}
+    \item 对于平滑的擦拭轨迹，期望加速度$\dot{V}_d$通常很小
+    \item Adjoint变换的计算需要额外的坐标变换，增加计算复杂度
+    \item 在PID控制足够强的情况下，前馈项的影响较小
+    \item 简化后仍能保证控制性能，同时提高实时性
+\end{enumerate}
+
+\subsubsection{简化2：Adjoint变换}
+
+\textbf{完整形式}需要计算：
+\begin{equation}
+Ad_{X^{-1}X_d} = \begin{bmatrix}
+R_{X^{-1}X_d} & 0 \\
+[p]_{\times} R_{X^{-1}X_d} & R_{X^{-1}X_d}
+\end{bmatrix}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $X = (R, p)$：当前末端执行器位姿
+    \item $X_d = (R_d, p_d)$：期望末端执行器位姿
+    \item $R_{X^{-1}X_d} = R^{-1} R_d$：相对旋转矩阵
+    \item $[p]_{\times}$：位置向量$p$的反对称矩阵
+\end{itemize}
+
+\textbf{简化处理}：代码中提供了\texttt{compute\_adjoint\_transformation}方法，但在实际控制中未使用，因为前馈加速度项已被忽略。
+
+\section{实际实现的控制公式}
+
+经过简化后，实际代码中使用的控制公式为：
+
+\begin{equation}
+\begin{split}
+\tau = J_b^T(\theta)\Bigg[&P(\theta)\left(K_p X_e + K_i\int_0^t X_e(t)dt + K_d V_e\right) \\
+&+ (I - P(\theta))\left(F_d + K_{fp}F_e + K_{fi}\int_0^t F_e(t)dt\right) + \tilde{\eta}(\theta, V_b)\Bigg]
+\end{split}
+\end{equation}
+
+与完整公式相比，去掉了前馈加速度项：
+\begin{equation}
+\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d) \approx \mathbf{0}
+\end{equation}
+
+\section{基础逻辑结构}
+
+\subsection{控制流程}
+
+算法的控制流程如下：
+
+\begin{enumerate}
+    \item \textbf{状态获取}：
+    \begin{itemize}
+        \item 获取当前关节角度$q$和角速度$\dot{q}$
+        \item 计算雅可比矩阵$J_b(\theta)$
+        \item 计算任务空间速度$V_b = J_b(\theta) \dot{q}$
+        \item 获取当前末端位置$p_{curr}$和姿态$q_{curr}$
+    \end{itemize}
+    
+    \item \textbf{动力学量计算}：
+    \begin{itemize}
+        \item 计算任务空间质量矩阵：$\tilde{\Lambda}(\theta) = (J_b M^{-1} J_b^T)^{-1}$
+        \item 计算任务空间Coriolis项：$\tilde{\eta}(\theta, V_b)$
+    \end{itemize}
+    
+    \item \textbf{约束和投影矩阵}：
+    \begin{itemize}
+        \item 根据接触状态确定约束矩阵$A(\theta)$（公式11.57）
+        \item 计算投影矩阵$P(\theta)$（公式11.63）
+    \end{itemize}
+    
+    \item \textbf{误差计算}：
+    \begin{itemize}
+        \item 位置误差：$X_e = p_{ref} - p_{curr}$
+        \item 速度误差：$V_e = v_{ref} - V_b[:3]$
+        \item 姿态误差：$e_{rot} = \text{quaternion\_error}(q_{ref}, q_{curr})$
+        \item 力误差：$F_e = F_{desired} - F_{curr}$
+    \end{itemize}
+    
+    \item \textbf{控制力计算}：
+    \begin{itemize}
+        \item 运动控制：$F_{motion} = P(\theta) \left(K_p X_e + K_i \int X_e + K_d V_e\right)$
+        \item 力控制：$F_{force} = (I - P(\theta)) \left(F_d + K_{fp} F_e + K_{fi} \int F_e\right)$
+        \item Coriolis补偿：$\tilde{\eta}(\theta, V_b)$（不投影）
+        \item 组合：$F_{cmd} = F_{motion} + F_{force} + \tilde{\eta}(\theta, V_b)$
+    \end{itemize}
+    
+    \item \textbf{关节力矩}：
+    \begin{equation}
+    \tau = J_b^T(\theta) F_{cmd} + g(\theta)
+    \end{equation}
+    其中$g(\theta)$是重力补偿项。
+\end{enumerate}
+
+\subsection{约束矩阵（公式11.57）}
+
+对于表面接触任务，约束矩阵定义为：
+
+\begin{equation}
+A(\theta) = \begin{bmatrix}
+0 & 0 & 1 & 0 & 0 & 0 \\  % 约束Z方向平移 v_z
+0 & 0 & 0 & 1 & 0 & 0 \\  % 约束绕X轴旋转 ω_x
+0 & 0 & 0 & 0 & 1 & 0 \\  % 约束绕Y轴旋转 ω_y
+0 & 0 & 0 & 0 & 0 & 1    % 约束绕Z轴旋转 ω_z
+\end{bmatrix}
+\end{equation}
+
+约束方程：
+\begin{equation}
+A(\theta) V_b = 0
+\end{equation}
+
+表示：
+\begin{itemize}
+    \item $v_z = 0$：Z方向平移速度为零（法向约束）
+    \item $\omega_x = \omega_y = \omega_z = 0$：所有旋转速度为零（保持工具与表面平行）
+\end{itemize}
+
+\subsection{投影矩阵（公式11.63）}
+
+投影矩阵将控制力分解到运动子空间和力子空间：
+
+\begin{equation}
+P(\theta) = I - A^T(\theta)(A(\theta)\tilde{\Lambda}^{-1}(\theta)A^T(\theta))^{-1}A(\theta)\tilde{\Lambda}^{-1}(\theta)
+\end{equation}
+
+性质：
+\begin{itemize}
+    \item $P(\theta)$：将力投影到运动子空间（rank = $6-k$，$k=4$为约束数量）
+    \item $I - P(\theta)$：将力投影到力子空间（rank = $k = 4$）
+    \item 正交性：$P(\theta) \cdot (I - P(\theta)) = 0$
+\end{itemize}
+
+\subsection{任务空间动力学}
+
+\subsubsection{质量矩阵}
+
+任务空间质量矩阵定义为：
+
+\begin{equation}
+\tilde{\Lambda}(\theta) = (J_b(\theta) M^{-1}(\theta) J_b^T(\theta))^{-1}
+\end{equation}
+
+其中$M(\theta) \in \mathbb{R}^{n \times n}$是关节空间质量矩阵。
+
+\subsubsection{Coriolis项}
+
+任务空间Coriolis项（公式8.91）：
+
+\begin{equation}
+\tilde{\eta}(\theta, V_b) = J_b^{-T}(\theta) h(\theta, J_b^{-1}(\theta) V_b) - \tilde{\Lambda}(\theta) \dot{J}_b(\theta) J_b^{-1}(\theta) V_b
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $h(\theta, \dot{q})$：关节空间的科里奥利、向心力和重力项
+    \item $\dot{J}_b(\theta)$：雅可比矩阵的时间导数
+\end{itemize}
+
+\textbf{重要}：根据书本公式11.61，Coriolis项$\tilde{\eta}(\theta, V_b)$不进行投影，直接添加到控制律中。
+
+\section{控制增益}
+
+\subsection{运动控制增益}
+
+\begin{itemize}
+    \item 位置增益：$K_p = \text{diag}(1000, 1000, 500)$
+    \item 积分增益：$K_i = \text{diag}(20, 20, 10)$
+    \item 微分增益：$K_d = \text{diag}(80, 80, 40)$
+    \item 旋转增益：$K_{p,rot} = [50, 50, 30]$
+\end{itemize}
+
+\subsection{力控制增益}
+
+\begin{itemize}
+    \item 力比例增益：$K_{fp} = 1.0$
+    \item 力积分增益：$K_{fi} = 0.2$
+    \item 期望力：$F_{desired} = -15.0$ N（向下为负）
+\end{itemize}
+
+\section{简化总结}
+
+与完整公式11.61相比，代码实现中进行了以下简化：
+
+\begin{enumerate}
+    \item \textbf{前馈加速度项}：$\tilde{\Lambda}(\theta)\frac{d}{dt}([Ad_{X^{-1}X_d}]V_d) \approx \mathbf{0}$
+    \begin{itemize}
+        \item 原因：对于平滑轨迹，此项影响很小
+        \item 影响：略微降低跟踪精度，但提高实时性
+        \item 适用场景：平滑的擦拭轨迹，PID控制足够强
+    \end{itemize}
+    
+    \item \textbf{Adjoint变换}：未实现完整的$[Ad_{X^{-1}X_d}]$计算
+    \begin{itemize}
+        \item 原因：前馈项已忽略，无需计算
+        \item 影响：无实际影响（因为前馈项为0）
+    \end{itemize}
+    
+    \item \textbf{其他项}：完全按照书本公式实现
+    \begin{itemize}
+        \item 投影矩阵$P(\theta)$：完整实现
+        \item Coriolis项$\tilde{\eta}(\theta, V_b)$：完整实现，不投影
+        \item PID控制项：完整实现
+        \item 力控制项：完整实现
+    \end{itemize}
+\end{enumerate}
+
+\section{代码结构}
+
+主要方法：
+
+\begin{itemize}
+    \item \texttt{control\_step()}：主控制循环，实现公式11.61
+    \item \texttt{compute\_constraint\_matrix()}：计算约束矩阵$A(\theta)$
+    \item \texttt{compute\_projection\_matrix()}：计算投影矩阵$P(\theta)$
+    \item \texttt{compute\_desired\_acceleration\_feedforward()}：计算前馈加速度（简化实现，返回0）
+    \item \texttt{compute\_adjoint\_transformation()}：计算Adjoint变换（已实现但未使用）
+\end{itemize}
+
+\section{总结}
+
+代码实现了书本公式11.61的混合运动-力控制算法，主要简化了前馈加速度项。对于擦桌子这类平滑轨迹任务，该简化是合理的，能够在保证控制性能的同时提高实时性。其他核心部分（投影矩阵、Coriolis补偿、PID控制、力控制）均按照书本公式完整实现。
+
+\end{document}
+

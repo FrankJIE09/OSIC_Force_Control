@@ -374,158 +374,62 @@ class DynamicsCalculator:
 
         return J
 
-    def _twist_skew_symmetric(self, V: np.ndarray) -> np.ndarray:
-        """
-        计算6维twist的反对称矩阵 [V]×（角速度在前版本）
-
-        对于6维twist V = [ω, v]^T（角速度在前，线速度在后），
-        反对称矩阵为：
-        [V]× = [[ω]×  [v]×]
-               [0    [ω]×]
-
-        其中：
-        - [ω]× 是3维角速度向量的反对称矩阵
-        - [v]× 是3维线速度向量的反对称矩阵
-
-        参数:
-            V: 6维twist [ω_x, ω_y, ω_z, v_x, v_y, v_z]^T
-
-        返回:
-            skew: 6×6反对称矩阵
-        """
-        omega = V[:3]  # 角速度部分
-        v = V[3:]      # 线速度部分
-
-        # 计算3维向量的反对称矩阵
-        omega_skew = np.array([
-            [0, -omega[2], omega[1]],
-            [omega[2], 0, -omega[0]],
-            [-omega[1], omega[0], 0]
-        ])
-
-        v_skew = np.array([
-            [0, -v[2], v[1]],
-            [v[2], 0, -v[0]],
-            [-v[1], v[0], 0]
-        ])
-
-        # 构建6×6反对称矩阵（角速度在前）
-        skew = np.zeros((6, 6))
-        skew[:3, :3] = omega_skew  # 角速度到角速度
-        skew[:3, 3:] = v_skew      # 线速度到角速度
-        skew[3:, :3] = np.zeros((3, 3))  # 角速度到线速度（为0）
-        skew[3:, 3:] = omega_skew  # 线速度到线速度
-
-        return skew
-
-    def _adjoint_action(self, V: np.ndarray, W: np.ndarray) -> np.ndarray:
-        """
-        计算伴随作用 ad_V(W) = [V]× W
-
-        对于身体雅可比，伴随作用定义为：
-        ad_V(W) = [V]× W
-
-        其中 [V]× 是6维twist的反对称矩阵
-
-        参数:
-            V: 6维twist（作用者）
-            W: 6维twist（被作用者）
-
-        返回:
-            result: 6维twist，ad_V(W)
-        """
-        V_skew = self._twist_skew_symmetric(V)
-        return V_skew @ W
-
     def compute_jacobian_derivative(self, q: np.ndarray, qdot: np.ndarray,
                                    task_space_dim: int = 6,
-                                   use_analytic: bool = True,
                                    epsilon: float = 1e-6) -> np.ndarray:
         """
         计算雅可比矩阵的时间导数 Ḃ(θ)
 
         公式：
-            Ḃ(θ) = d/dt J(θ) = Σⱼ (∂J/∂θⱼ) θ̇ⱼ
+            Ḃ(θ) = d/dt J(θ) = Σᵢ (∂J/∂θᵢ) θ̇ᵢ
 
         链式法则：
-            Ḃ(θ) = Σⱼ₌₁ⁿ (∂J/∂θⱼ) · (dθⱼ/dt)
-                  = Σⱼ₌₁ⁿ (∂J/∂θⱼ) θ̇ⱼ
+            Ḃ(θ) = Σᵢ₌₁ⁿ (∂J/∂θᵢ) · (dθᵢ/dt)
+                  = Σᵢ₌₁ⁿ (∂J/∂θᵢ) θ̇ᵢ
 
-        方法1：解析方法（对于身体雅可比）
-        对于身体雅可比 J(θ)，有：
-            ∂Jᵢ/∂θⱼ = {
-                ad_{Jᵢ}(Jⱼ)  对于 i < j,
-                0           对于 i ≥ j
-            }
+        数值微分方法（实现）：
+            ∂J/∂θᵢ ≈ [J(θ + εeᵢ) - J(θ - εeᵢ)] / (2ε)
 
         其中：
-            - Jᵢ 是雅可比矩阵的第 i 列（6维twist）
-            - ad_{Jᵢ}(Jⱼ) = [Jᵢ]× Jⱼ 是伴随作用
-            - [Jᵢ]× 是6维twist的反对称矩阵
+            - ε: 数值微分步长（默认 1e-6）
+            - eᵢ: 第i个单位向量
 
-        方法2：数值微分方法（备用）
-            ∂J/∂θⱼ ≈ [J(θ + εeⱼ) - J(θ - εeⱼ)] / (2ε)
+        然后：
+            Ḃ(θ) = Σᵢ (∂J/∂θᵢ) θ̇ᵢ
+
+        注意：解析方法更精确，但需要符号计算
 
         参数:
             q: 关节角度向量 (n_joints,)
             qdot: 关节角速度向量 (n_joints,)
-            task_space_dim: 任务空间维度（必须为6，解析方法仅支持6DOF）
-            use_analytic: 是否使用解析方法（默认True）
-            epsilon: 数值微分的步长（仅在use_analytic=False时使用）
+            task_space_dim: 任务空间维度
+            epsilon: 数值微分的步长
 
         返回:
             J_dot: 雅可比矩阵时间导数 (task_space_dim, n_joints)
         """
-        if use_analytic and task_space_dim == 6:
-            # ========== 解析方法：使用伴随作用公式 ==========
-            # 计算当前配置下的雅可比矩阵
-            J = self.compute_jacobian(q, task_space_dim)
+        # 初始化雅可比时间导数
+        # Ḃ(θ) = Σᵢ (∂J/∂θᵢ) θ̇ᵢ
+        J_dot = np.zeros((task_space_dim, self.n_joints))
 
-            # 初始化雅可比时间导数
-            J_dot = np.zeros((task_space_dim, self.n_joints))
+        for i in range(self.n_joints):
+            # 计算 ∂J/∂θᵢ 使用中心差分
+            # ∂J/∂θᵢ ≈ [J(θ + εeᵢ) - J(θ - εeᵢ)] / (2ε)
+            q_plus = q.copy()
+            q_plus[i] += epsilon
+            J_plus = self.compute_jacobian(q_plus, task_space_dim)
 
-            # 根据公式：∂Jᵢ/∂θⱼ = {
-            #     ad_{Jᵢ}(Jⱼ)  对于 i < j,
-            #     0           对于 i ≥ j
-            # }
-            # 使用链式法则：Ḃ(θ) = Σⱼ (∂J/∂θⱼ) θ̇ⱼ
-            # 对于第 i 列：Ḃᵢ = Σⱼ (∂Jᵢ/∂θⱼ) θ̇ⱼ = Σ_{j>i} ad_{Jᵢ}(Jⱼ) θ̇ⱼ
+            q_minus = q.copy()
+            q_minus[i] -= epsilon
+            J_minus = self.compute_jacobian(q_minus, task_space_dim)
 
-            # 对于每个关节 i（雅可比矩阵的第 i 列）
-            for i in range(self.n_joints):
-                J_i = J[:, i]  # 第 i 列雅可比（6维twist）
+            dJ_dqi = (J_plus - J_minus) / (2 * epsilon)
 
-                # 对于所有 j > i 的关节，计算 ∂Jᵢ/∂θⱼ = ad_{Jᵢ}(Jⱼ)
-                for j in range(i + 1, self.n_joints):
-                    J_j = J[:, j]  # 第 j 列雅可比（6维twist）
-                    # 计算伴随作用：ad_{Jᵢ}(Jⱼ) = [Jᵢ]× Jⱼ
-                    dJ_i_dtheta_j = self._adjoint_action(J_i, J_j)
-                    # 累加：Ḃᵢ += (∂Jᵢ/∂θⱼ) θ̇ⱼ
-                    J_dot[:, i] += dJ_i_dtheta_j * qdot[j]
-                # 对于 j ≤ i：∂Jᵢ/∂θⱼ = 0，不需要计算
+            # 累加：Ḃ += (∂J/∂θᵢ) θ̇ᵢ
+            # 链式法则：dJ/dt = Σᵢ (∂J/∂θᵢ) · (dθᵢ/dt)
+            J_dot += dJ_dqi * qdot[i]
 
-            return J_dot
-        else:
-            # ========== 数值微分方法（备用） ==========
-            # 初始化雅可比时间导数
-            J_dot = np.zeros((task_space_dim, self.n_joints))
-
-            for j in range(self.n_joints):
-                # 计算 ∂J/∂θⱼ 使用中心差分
-                q_plus = q.copy()
-                q_plus[j] += epsilon
-                J_plus = self.compute_jacobian(q_plus, task_space_dim)
-
-                q_minus = q.copy()
-                q_minus[j] -= epsilon
-                J_minus = self.compute_jacobian(q_minus, task_space_dim)
-
-                dJ_dqj = (J_plus - J_minus) / (2 * epsilon)
-
-                # 累加：Ḃ += (∂J/∂θⱼ) θ̇ⱼ
-                J_dot += dJ_dqj * qdot[j]
-
-            return J_dot
+        return J_dot
 
     def compute_task_space_mass_matrix(self, q: np.ndarray,
                                        task_space_dim: int = 6,

@@ -1,0 +1,393 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{margin=2.5cm}
+
+% 代码样式设置
+\lstset{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=4,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false
+}
+
+\title{任务空间速度控制代码说明\\
+\large 基于公式236的6DOF扩展实现}
+\author{OSIC Force Control Project}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{概述}
+
+本文档介绍基于公式236实现的任务空间速度控制代码。该代码使用MuJoCo仿真器实现Franka Panda机械臂的任务空间速度控制，控制律为：
+
+\begin{equation}
+\dot{\theta} = J^{-1}(\theta)\left[\dot{X}_d + K_p X_e\right]
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\dot{\theta}$：关节速度命令（7维）
+    \item $J(\theta)$：雅可比矩阵（6×7）
+    \item $\dot{X}_d$：参考末端执行器速度（6维twist）
+    \item $K_p$：比例增益矩阵（6×6）
+    \item $X_e = \log(X^{-1}X_d)$：配置误差（6维）
+\end{itemize}
+
+\section{控制律的6DOF扩展}
+
+公式236原本是针对位置控制（3DOF）的，本代码将其扩展到6DOF（位置+姿态）：
+
+\begin{equation}
+\dot{\theta} = J^+(\theta)\left[\dot{X}_d + K_p X_e\right]
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $X_e = \log(X^{-1}X_d)$ 使用SE(3)的log映射计算6维配置误差
+    \item $\dot{X}_d = [\omega_d, v_d]^T$ 是6维twist（角速度在前，线速度在后）
+    \item $J^+$ 是雅可比矩阵的伪逆，用于处理冗余机器人（7自由度）
+\end{itemize}
+
+\section{代码结构}
+
+\subsection{主要类：TaskSpaceVelocitySimulation}
+
+代码的核心是\texttt{TaskSpaceVelocitySimulation}类，主要包含以下方法：
+
+\subsubsection{初始化方法}
+
+\begin{lstlisting}[caption=初始化方法]
+def __init__(self, model_path: str = "surface_force_control.xml"):
+    # 加载MuJoCo模型
+    self.model = mujoco.MjModel.from_xml_path(model_path)
+    self.data = mujoco.MjData(self.model)
+    
+    # 获取关节信息
+    self.joint_names = [f"panda_joint{i + 1}" for i in range(7)]
+    self.velocity_actuator_names = [f"vel_panda_joint{i + 1}" for i in range(7)]
+    
+    # 设置初始配置
+    q_init = self.compute_initial_configuration()
+    
+    # 设置控制参数
+    self.setup_control_parameters()
+\end{lstlisting}
+
+\textbf{关键点：}
+\begin{itemize}
+    \item 使用速度执行器（velocity actuators）而不是力矩执行器（motor）
+    \item 执行器名称格式：\texttt{vel\_panda\_joint1} 到 \texttt{vel\_panda\_joint7}
+    \item 不需要动力学计算器（速度控制不需要动力学模型）
+\end{itemize}
+
+\subsubsection{控制参数设置}
+
+\begin{lstlisting}[caption=控制参数设置]
+def setup_control_parameters(self):
+    """设置控制参数（公式236）"""
+    # 6维任务空间控制增益（角速度在前）
+    # K_p: 位置和姿态比例增益
+    self.K_p = np.diag([5.0, 5.0, 5.0, 3.0, 3.0, 3.0])  # [旋转, 位置]
+\end{lstlisting}
+
+\textbf{说明：}
+\begin{itemize}
+    \item 仅使用比例增益$K_p$，速度控制通常不需要积分和微分项
+    \item 前3个元素对应旋转（姿态）控制，后3个元素对应位置控制
+    \item 旋转增益通常设置得比位置增益稍大
+\end{itemize}
+
+\subsubsection{雅可比矩阵计算}
+
+\begin{lstlisting}[caption=雅可比矩阵计算]
+def get_jacobian_6x7(self):
+    """获取6DOF雅可比矩阵（位置+姿态）"""
+    jacp = np.zeros((3, self.model.nv))  # 位置雅可比
+    jacr = np.zeros((3, self.model.nv))  # 旋转雅可比
+    
+    hand_body_id = self.model.body("panda_hand").id
+    mujoco.mj_jacBody(self.model, self.data, jacp, jacr, hand_body_id)
+    
+    J = np.zeros((6, self.n_joints))
+    for i, name in enumerate(self.joint_names):
+        dof_idx = self.joint_dof_indices[i]
+        if dof_idx >= 0:
+            J[:3, i] = jacr[:, dof_idx]  # 角速度部分
+            J[3:, i] = jacp[:, dof_idx]   # 线速度部分
+    
+    return J
+\end{lstlisting}
+
+\textbf{重要约定：}
+\begin{itemize}
+    \item 使用书本第513行约定：角速度在前，线速度在后
+    \item $J[:3, :]$ 对应角速度部分（$\omega_x, \omega_y, \omega_z$）
+    \item $J[3:, :]$ 对应线速度部分（$v_x, v_y, v_z$）
+\end{itemize}
+
+\subsubsection{配置误差计算}
+
+\begin{lstlisting}[caption=配置误差计算（SE(3) log映射）]
+def compute_configuration_error(self, pos_curr, quat_curr, pos_ref, quat_ref):
+    """计算配置误差 X_e = log(X^{-1} X_d)"""
+    # 转换为旋转矩阵
+    rot_curr = Rotation.from_quat(q_curr_scipy)
+    rot_ref = Rotation.from_quat(q_ref_scipy)
+    R_curr = rot_curr.as_matrix()
+    R_ref = rot_ref.as_matrix()
+    
+    # 构建SE(3)变换矩阵
+    T_curr = np.eye(4)
+    T_curr[:3, :3] = R_curr
+    T_curr[:3, 3] = pos_curr
+    
+    T_ref = np.eye(4)
+    T_ref[:3, :3] = R_ref
+    T_ref[:3, 3] = pos_ref
+    
+    # 计算相对变换：T_err = T_curr^{-1} @ T_ref
+    T_curr_inv = np.eye(4)
+    T_curr_inv[:3, :3] = R_curr.T
+    T_curr_inv[:3, 3] = -R_curr.T @ pos_curr
+    T_err = T_curr_inv @ T_ref
+    
+    # 计算log映射：X_e = log(T_err)
+    X_e = self.se3_log_map(T_err[:3, :3], T_err[:3, 3])
+    return X_e
+\end{lstlisting}
+
+\textbf{说明：}
+\begin{itemize}
+    \item 使用SE(3)的log映射计算6维配置误差
+    \item 误差在末端执行器坐标系中表示
+    \item 前3维是旋转误差（旋转向量），后3维是位置误差
+\end{itemize}
+
+\subsubsection{控制律实现}
+
+\begin{lstlisting}[caption=控制律实现（核心代码）]
+def control_step(self, t, dt=0.002):
+    """执行一步任务空间速度控制 - 公式236（6DOF扩展）"""
+    
+    # 1. 获取当前状态
+    pos_curr = np.array(self.data.body("panda_hand").xpos)
+    quat_curr = np.array(self.data.body("panda_hand").xquat)
+    
+    # 2. 计算雅可比矩阵
+    J = self.get_jacobian_6x7()
+    
+    # 3. 生成参考轨迹
+    z_des = 0.4 - min(t / 2.0, 1.0) * 0.25
+    pos_ref = np.array([0.4, 0.0, z_des])
+    vel_ref_linear = np.array([0.0, 0.0, -0.25 / 2.0 if t < 2.0 else 0.0])
+    vel_ref_angular = np.zeros(3)
+    vel_ref_6d = np.concatenate([vel_ref_angular, vel_ref_linear])
+    
+    # 4. 计算配置误差
+    X_e = self.compute_configuration_error(
+        pos_curr, quat_curr, pos_ref, quat_ref
+    )
+    
+    # 5. 任务空间速度控制律（公式236）
+    # θ̇ = J^{-1}(θ)[Ẋ_d + K_p X_e]
+    X_dot_desired = vel_ref_6d + self.K_p @ X_e
+    
+    # 6. 使用伪逆计算关节速度
+    J_pinv = np.linalg.pinv(J, rcond=1e-6)
+    qdot_cmd = J_pinv @ X_dot_desired
+    
+    # 7. 速度限制
+    qdot_max = np.array([2.0, 2.0, 2.0, 2.0, 2.5, 2.5, 2.5])
+    qdot_cmd = np.clip(qdot_cmd, -qdot_max, qdot_max)
+    
+    # 8. 应用控制（速度控制）
+    for i, name in enumerate(self.velocity_actuator_names):
+        ctrl_id = self.model.actuator(name).id
+        self.data.actuator(ctrl_id).ctrl = float(qdot_cmd[i])
+\end{lstlisting}
+
+\textbf{控制流程：}
+\begin{enumerate}
+    \item 获取当前末端执行器位姿（位置和姿态）
+    \item 计算6×7雅可比矩阵
+    \item 生成参考轨迹（位置和速度）
+    \item 计算6维配置误差$X_e = \log(X^{-1}X_d)$
+    \item 计算期望任务空间速度：$\dot{X}_d + K_p X_e$
+    \item 使用雅可比伪逆计算关节速度：$\dot{\theta} = J^+ \dot{X}_{desired}$
+    \item 限制关节速度在安全范围内
+    \item 将速度命令发送给速度执行器
+\end{enumerate}
+
+\section{与力矩控制版本的区别}
+
+\subsection{主要差异}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{特性} & \textbf{速度控制（公式236）} & \textbf{力矩控制（公式11.37）} \\
+\hline
+控制律 & $\dot{\theta} = J^{-1}[\dot{X}_d + K_p X_e]$ & $\tau = J^T[\Lambda \ddot{X}_d + K_p X_e + K_d V_e] + \eta$ \\
+\hline
+执行器类型 & velocity & motor \\
+\hline
+输出量 & 关节速度 $\dot{\theta}$ & 关节力矩 $\tau$ \\
+\hline
+控制参数 & 仅$K_p$ & $K_p, K_i, K_d$ \\
+\hline
+动力学模型 & 不需要 & 需要（质量矩阵、Coriolis项） \\
+\hline
+雅可比运算 & 伪逆 $J^+$ & 转置 $J^T$ \\
+\hline
+前馈项 & 参考速度 $\dot{X}_d$ & 参考加速度 $\ddot{X}_d$ \\
+\hline
+\end{tabular}
+\caption{速度控制与力矩控制的主要区别}
+\end{table}
+
+\subsection{代码层面的差异}
+
+\begin{enumerate}
+    \item \textbf{执行器设置}：
+    \begin{itemize}
+        \item 速度控制：使用\texttt{<velocity>}执行器，名称格式为\texttt{vel\_panda\_joint*}
+        \item 力矩控制：使用\texttt{<motor>}执行器，名称格式为\texttt{panda\_joint*}
+    \end{itemize}
+    
+    \item \textbf{控制参数}：
+    \begin{itemize}
+        \item 速度控制：仅需设置$K_p$比例增益
+        \item 力矩控制：需要$K_p, K_i, K_d$三个增益矩阵
+    \end{itemize}
+    
+    \item \textbf{动力学计算}：
+    \begin{itemize}
+        \item 速度控制：不需要计算质量矩阵和Coriolis项
+        \item 力矩控制：需要计算$\Lambda(\theta)$和$\eta(\theta, V_b)$
+    \end{itemize}
+    
+    \item \textbf{控制输出}：
+    \begin{itemize}
+        \item 速度控制：直接输出关节速度命令
+        \item 力矩控制：输出关节力矩命令
+    \end{itemize}
+\end{enumerate}
+
+\section{MuJoCo XML配置}
+
+\subsection{panda.xml中的执行器配置}
+
+速度控制版本将所有7个关节的执行器从\texttt{<motor>}改为\texttt{<velocity>}：
+
+\begin{lstlisting}[language=XML, caption=速度执行器配置]
+<actuator>
+  <velocity ctrllimited="true" ctrlrange="-2.0 2.0" 
+            joint="panda_joint1" kv="10" 
+            name="vel_panda_joint1" />
+  <velocity ctrllimited="true" ctrlrange="-2.0 2.0" 
+            joint="panda_joint2" kv="10" 
+            name="vel_panda_joint2" />
+  <!-- ... 其他关节 ... -->
+  <velocity ctrllimited="true" ctrlrange="-2.5 2.5" 
+            joint="panda_joint5" kv="10" 
+            name="vel_panda_joint5" />
+  <!-- ... -->
+</actuator>
+\end{lstlisting}
+
+\textbf{参数说明：}
+\begin{itemize}
+    \item \texttt{ctrlrange}：速度限制（rad/s），前4个关节为±2.0，后3个关节为±2.5
+    \item \texttt{kv}：速度阻尼系数，提供速度反馈阻尼
+    \item \texttt{name}：执行器名称，必须与代码中的\texttt{velocity\_actuator\_names}匹配
+\end{itemize}
+
+\section{使用说明}
+
+\subsection{运行仿真}
+
+\begin{lstlisting}[caption=运行速度控制仿真]
+if __name__ == "__main__":
+    sim = TaskSpaceVelocitySimulation(
+        model_path="surface_force_control.xml"
+    )
+    sim.debug = False  # 设置为True启用调试输出
+    sim.run(duration=30.0)
+\end{lstlisting}
+
+\subsection{调整控制参数}
+
+可以通过修改\texttt{setup\_control\_parameters()}方法中的$K_p$矩阵来调整控制性能：
+
+\begin{lstlisting}[caption=调整控制增益]
+def setup_control_parameters(self):
+    # 增大增益可以提高响应速度，但可能引起振荡
+    # 减小增益可以提高稳定性，但响应较慢
+    self.K_p = np.diag([5.0, 5.0, 5.0, 3.0, 3.0, 3.0])  # [旋转, 位置]
+\end{lstlisting}
+
+\section{数学公式总结}
+
+\subsection{控制律}
+
+\begin{equation}
+\dot{\theta} = J^+(\theta)\left[\dot{X}_d + K_p X_e\right]
+\end{equation}
+
+\subsection{配置误差}
+
+\begin{equation}
+X_e = \log(X^{-1}X_d) = \log\left(\begin{bmatrix} R_curr^T R_ref & R_curr^T(p_ref - p_curr) \\ 0 & 1 \end{bmatrix}\right)
+\end{equation}
+
+\subsection{雅可比伪逆}
+
+对于冗余机器人（7自由度，6维任务空间），使用伪逆：
+
+\begin{equation}
+J^+ = J^T(JJ^T)^{-1}
+\end{equation}
+
+或使用SVD分解的数值稳定方法（代码中使用\texttt{np.linalg.pinv}）。
+
+\section{总结}
+
+本代码实现了基于公式236的任务空间速度控制，主要特点：
+
+\begin{itemize}
+    \item \textbf{简单性}：不需要动力学模型，仅需雅可比矩阵
+    \item \textbf{效率}：计算量小，适合实时控制
+    \item \textbf{6DOF扩展}：支持位置和姿态的联合控制
+    \item \textbf{冗余处理}：使用伪逆处理7自由度冗余机器人
+\end{itemize}
+
+速度控制适用于具有速度控制执行器的机器人系统，相比力矩控制实现更简单，但控制精度可能略低，因为不利用动力学模型进行补偿。
+
+\end{document}
+

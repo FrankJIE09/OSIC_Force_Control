@@ -1,0 +1,195 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{geometry}
+\geometry{a4paper, margin=2.5cm}
+
+\title{SE(3)的Log映射中平移部分$v$的计算公式推导}
+\author{机器人控制理论}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{问题背景}
+
+在机器人控制中，我们需要计算配置误差$X_e = \log(X^{-1} X_d)$，其中$X, X_d \in \text{SE}(3)$是刚体变换。对于SE(3)中的变换：
+\begin{equation}
+T = \begin{bmatrix} R & p \\ 0 & 1 \end{bmatrix} \in \text{SE}(3)
+\end{equation}
+其中$R \in \text{SO}(3)$是旋转矩阵，$p \in \mathbb{R}^3$是平移向量。
+
+SE(3)的log映射定义为：
+\begin{equation}
+\log(T) = \begin{bmatrix} v \\ \omega \end{bmatrix} \in \mathbb{R}^6
+\end{equation}
+其中：
+\begin{itemize}
+    \item $\omega \in \mathbb{R}^3$是旋转部分（旋转向量），通过$\omega = \log(R)$计算
+    \item $v \in \mathbb{R}^3$是平移部分，需要通过特定公式计算
+\end{itemize}
+
+\section{平移部分$v$的计算公式}
+
+平移部分$v$的计算公式为：
+\begin{equation}
+v = V^{-1}(\omega) \cdot p
+\end{equation}
+其中$V^{-1}(\omega)$是一个$3 \times 3$矩阵，定义为：
+\begin{equation}
+V^{-1}(\omega) = I - \frac{1-\cos(\theta)}{\theta^2} [\hat{\omega}]_\times + \frac{\theta - \sin(\theta)}{\theta^3} [\hat{\omega}]_\times^2
+\end{equation}
+其中：
+\begin{itemize}
+    \item $\theta = \|\omega\|$是旋转角度
+    \item $\hat{\omega} = \omega / \theta$是归一化的旋转轴（当$\theta \neq 0$时）
+    \item $[\hat{\omega}]_\times$是$\hat{\omega}$的反对称矩阵：
+    \begin{equation}
+    [\hat{\omega}]_\times = \begin{bmatrix}
+        0 & -\hat{\omega}_z & \hat{\omega}_y \\
+        \hat{\omega}_z & 0 & -\hat{\omega}_x \\
+        -\hat{\omega}_y & \hat{\omega}_x & 0
+    \end{bmatrix}
+    \end{equation}
+    \item $[\hat{\omega}]_\times^2 = [\hat{\omega}]_\times \cdot [\hat{\omega}]_\times$是反对称矩阵的平方
+\end{itemize}
+
+\section{公式推导}
+
+\subsection{SE(3)的李代数结构}
+
+SE(3)的李代数$\mathfrak{se}(3)$由所有形如：
+\begin{equation}
+\xi = \begin{bmatrix} [\omega]_\times & v \\ 0 & 0 \end{bmatrix} \in \mathfrak{se}(3)
+\end{equation}
+的矩阵组成，其中$\omega, v \in \mathbb{R}^3$。
+
+对于SE(3)中的变换$T = [R, p; 0, 1]$，其log映射$\log(T) = [v, \omega]^T$满足：
+\begin{equation}
+T = \exp(\xi) = \exp\left(\begin{bmatrix} [\omega]_\times & v \\ 0 & 0 \end{bmatrix}\right)
+\end{equation}
+
+\subsection{指数映射的级数展开}
+
+SE(3)的指数映射可以展开为：
+\begin{equation}
+\exp(\xi) = I + \xi + \frac{\xi^2}{2!} + \frac{\xi^3}{3!} + \cdots
+\end{equation}
+
+对于$\xi = \begin{bmatrix} [\omega]_\times & v \\ 0 & 0 \end{bmatrix}$，通过级数展开和矩阵运算，可以得到：
+\begin{equation}
+\exp(\xi) = \begin{bmatrix} \exp([\omega]_\times) & V(\omega) v \\ 0 & 1 \end{bmatrix}
+\end{equation}
+其中：
+\begin{itemize}
+    \item $\exp([\omega]_\times) = R$是旋转矩阵（Rodrigues公式）
+    \item $V(\omega)$是$3 \times 3$矩阵，定义为：
+    \begin{equation}
+    V(\omega) = I + \frac{1-\cos(\theta)}{\theta^2} [\hat{\omega}]_\times + \frac{\theta - \sin(\theta)}{\theta^3} [\hat{\omega}]_\times^2
+    \end{equation}
+\end{itemize}
+
+\subsection{从指数映射到log映射}
+
+给定$T = [R, p; 0, 1]$，我们需要找到$\xi$使得$\exp(\xi) = T$。
+
+从指数映射的表达式：
+\begin{equation}
+T = \begin{bmatrix} R & V(\omega) v \\ 0 & 1 \end{bmatrix} = \begin{bmatrix} R & p \\ 0 & 1 \end{bmatrix}
+\end{equation}
+可以得到：
+\begin{equation}
+p = V(\omega) v
+\end{equation}
+
+因此，要计算$v$，我们需要求$V(\omega)$的逆：
+\begin{equation}
+v = V^{-1}(\omega) p
+\end{equation}
+
+\subsection{$V^{-1}(\omega)$的推导}
+
+$V(\omega)$的表达式为：
+\begin{equation}
+V(\omega) = I + \frac{1-\cos(\theta)}{\theta^2} [\hat{\omega}]_\times + \frac{\theta - \sin(\theta)}{\theta^3} [\hat{\omega}]_\times^2
+\end{equation}
+
+利用反对称矩阵的性质：
+\begin{itemize}
+    \item $[\hat{\omega}]_\times^3 = -[\hat{\omega}]_\times$（对于单位向量$\hat{\omega}$）
+    \item $[\hat{\omega}]_\times^4 = -[\hat{\omega}]_\times^2$
+    \item $[\hat{\omega}]_\times^5 = [\hat{\omega}]_\times$
+    \item 以此类推，形成周期为4的循环
+\end{itemize}
+
+通过矩阵求逆或级数展开，可以得到$V^{-1}(\omega)$的表达式：
+\begin{equation}
+V^{-1}(\omega) = I - \frac{1-\cos(\theta)}{\theta^2} [\hat{\omega}]_\times + \frac{\theta - \sin(\theta)}{\theta^3} [\hat{\omega}]_\times^2
+\end{equation}
+
+\subsection{小角度近似}
+
+当$\theta \ll 1$（小角度）时，可以使用Taylor展开：
+\begin{align}
+\cos(\theta) &\approx 1 - \frac{\theta^2}{2} + O(\theta^4) \\
+\sin(\theta) &\approx \theta - \frac{\theta^3}{6} + O(\theta^5)
+\end{align}
+
+代入$V^{-1}(\omega)$的公式：
+\begin{align}
+V^{-1}(\omega) &\approx I - \frac{\theta^2/2}{\theta^2} [\hat{\omega}]_\times + \frac{\theta^3/6}{\theta^3} [\hat{\omega}]_\times^2 \\
+&= I - \frac{1}{2} [\hat{\omega}]_\times + \frac{1}{6} [\hat{\omega}]_\times^2
+\end{align}
+
+对于非常小的角度，可以进一步近似为：
+\begin{equation}
+V^{-1}(\omega) \approx I - \frac{1}{2} [\omega]_\times
+\end{equation}
+因为当$\theta \to 0$时，$[\hat{\omega}]_\times^2$项可以忽略。
+
+\section{代码实现}
+
+在代码中，我们使用以下实现：
+
+\begin{verbatim}
+theta = ||omega||
+if theta < 1e-6:
+    # 小角度近似
+    V_inv = I - 0.5 * [omega]_×
+else:
+    # 精确计算
+    omega_normalized = omega / theta
+    V_inv = I - (1-cos(theta))/theta² * [omega_normalized]_× 
+            + (theta-sin(theta))/theta³ * [omega_normalized]_×²
+v = V_inv @ p
+\end{verbatim}
+
+\section{几何意义}
+
+$V^{-1}(\omega)$矩阵的作用是将平移向量$p$从SE(3)变换的"原始"坐标系转换到twist空间中的平移部分$v$。
+
+几何上，$v$表示的是：如果沿着旋转轴$\omega$旋转角度$\theta$，同时沿着某个方向平移，那么平移向量$p$在twist空间中的表示就是$v$。
+
+$V^{-1}(\omega)$矩阵考虑了旋转对平移的影响，因为SE(3)中的旋转和平移是耦合的（不是简单的直积）。
+
+\section{总结}
+
+SE(3)的log映射中平移部分$v$的计算公式：
+\begin{equation}
+v = V^{-1}(\omega) p
+\end{equation}
+其中：
+\begin{equation}
+V^{-1}(\omega) = I - \frac{1-\cos(\theta)}{\theta^2} [\hat{\omega}]_\times + \frac{\theta - \sin(\theta)}{\theta^3} [\hat{\omega}]_\times^2
+\end{equation}
+
+这个公式来自于SE(3)的李群-李代数对应关系，确保了从SE(3)到$\mathfrak{se}(3)$的映射是正确且唯一的。
+
+\end{document}
+
+
+
