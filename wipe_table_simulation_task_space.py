@@ -405,5 +405,5 @@ class TaskSpaceSimulation:
 
 
 if __name__ == "__main__":
-    sim = TaskSpaceSimulation(model_path="surface_force_control_b.xml")
+    sim = TaskSpaceSimulation(model_path="surface_force_control.xml")
     sim.run(duration=130.0)

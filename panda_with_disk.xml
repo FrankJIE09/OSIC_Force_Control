@@ -1,4 +1,12 @@
 <mujoco model="panda_with_disk">
+  <compiler angle="radian" meshdir="./mesh" texturedir="./texture" />
+
+  <default>
+    <geom contype="1" conaffinity="1" condim="3" friction="0.5 0.02 0.001" solimp="0.95 0.99 0.001" solref="0.01 1" />
+    <joint armature="0.1" damping="0.1" />
+    <site rgba="0.5 0.5 0.5 0.3" />
+  </default>
+
   <asset>
     <mesh name="link0" file="link0.obj" />
     <mesh name="link1" file="link1.obj" />
@@ -8,6 +16,7 @@
     <mesh name="link5" file="link5.obj" />
     <mesh name="link6" file="link6.obj" />
     <mesh name="link7" file="link7.obj" />
+
     <texture name="panda" file="panda.png" type="2d" />
     <material name="panda" texture="panda" shininess=".4" specular=".4" />
     <material name="panda_white" rgba="1 1 1 1" shininess="0.4" specular="0.4" />
@@ -25,16 +34,13 @@
   </actuator>
 
   <sensor>
-    <framepos name="disk_pos" objtype="site" objname="disk_center_site" />
-    <framequat name="disk_quat" objtype="site" objname="disk_center_site" />
-    <framelinvel name="disk_linvel" objtype="site" objname="disk_center_site" />
-    <frameangvel name="disk_angvel" objtype="site" objname="disk_center_site" />
+<!--    <framepos name="disk_pos" objtype="site" objname="disk_center_site" />-->
+<!--    <framequat name="disk_quat" objtype="site" objname="disk_center_site" />-->
+<!--    <framelinvel name="disk_linvel" objtype="site" objname="disk_center_site" />-->
+<!--    <frameangvel name="disk_angvel" objtype="site" objname="disk_center_site" />-->
 
-    <!-- 6维力/力矩传感器：force(3维) + torque(3维) -->
-    <!-- force传感器测量子体(disk)和父体(force_sensor_body)之间的相互作用力 -->
-    <!-- torque传感器测量子体(disk)和父体(force_sensor_body)之间的相互作用力矩 -->
-    <force name="force_sensor_force" site="force_sensor_site" />
-    <torque name="force_sensor_torque" site="force_sensor_site" />
+    <force name="force_sensor_force" site="disk_center_site" />
+    <torque name="force_sensor_torque" site="disk_center_site" />
   </sensor>
 
   <worldbody>
@@ -72,27 +78,31 @@
                     <body name="panda_link8" pos="0 0 0.107">
                       <body name="panda_hand" euler="0 0 -0.785398163397">
                         <inertial pos="-1e-02 0 3e-02" mass="7.3e-01" diaginertia="1e-03 2.5e-03 1.7e-03" />
+
                         <geom name="hand_connector" type="box" size="0.02 0.02 0.03" material="panda" rgba="0.5 0.5 0.5 1" />
-                        
-                        <!-- 力传感器dummy body：通过weld约束连接到panda_hand -->
-                        <!-- 这个body用于测量作用在disk上的6维力/力矩 -->
-                        <body name="force_sensor_body" pos="0 0 0.05">
-                          <inertial pos="0 0 0" mass="0.01" diaginertia="1e-6 1e-6 1e-6" />
-                          <!-- 力传感器site：用于force和torque传感器 -->
-                          <site name="force_sensor_site" pos="0 0 0" size="0.01" rgba="0 1 0 0.5" />
-                          <!-- 力传感器可视化（小盒子） -->
-                          <geom name="force_sensor_geom" type="box" size="0.015 0.015 0.01" material="panda" rgba="0 1 0 0.8" />
-                          
-                          <!-- 圆盘body：作为force_sensor_body的子体 -->
-                          <!-- force和torque传感器测量disk和force_sensor_body之间的相互作用 -->
-                          <body name="disk" pos="0 0 0">
-                            <inertial pos="0 0 0" mass="0.2" diaginertia="0.001 0.001 0.001" />
-                            <site name="disk_center_site" pos="0 0 0" size="0.005" rgba="1 0 0 0.5" />
-                            <site name="disk_bottom_site" pos="0 0 -0.005" size="0.005" rgba="0 0 1 0.5" />
-                            <geom name="disk_geom" type="cylinder" size="0.06 0.005" material="disk_material" contype="1" conaffinity="1" friction="0.5 0.02 0.001" />
-                            <geom name="disk_bottom" type="cylinder" size="0.06 0.001" pos="0 0 -0.005" material="disk_material" contype="1" conaffinity="1" friction="0.5 0.02 0.001" />
-                          </body>
+                        <site name="ft_sensor_site"  size="0.01" rgba="1 0 0 1"/>
+
+                        <!-- disk直接作为panda_hand的子体（固定连接，无joint） -->
+                        <body name="disk" pos="0 0 0.05">
+                          <inertial pos="0 0 0" mass="0.2" diaginertia="0.001 0.001 0.001" />
+
+                          <!-- ft_sensor_site附加到disk（子体）上，用于force传感器测量 -->
+
+                          <site name="disk_center_site" pos="0 0 0" size="0.005" rgba="0 1 0 0.5" type="sphere" />
+
+                          <geom name="disk_geom" type="cylinder" size="0.06 0.005"
+                                material="disk_material"
+                                condim="6"
+                                friction="0.5 0.02 0.001"
+                                solimp="0.95 0.99 0.001"
+                                solref="0.01 1" />
+
+                          <geom name="disk_bottom" type="cylinder" size="0.06 0.001" pos="0 0 -0.005"
+                                material="disk_material"
+                                condim="6"
+                                friction="0.5 0.02 0.001" />
                         </body>
+
                       </body>
                     </body>
                   </body>
@@ -104,16 +114,4 @@
       </body>
     </body>
   </worldbody>
-  
-  <equality>
-    <!-- Weld约束：将force_sensor_body固定到panda_hand -->
-    <!-- 这个约束使得force_sensor_body和panda_hand之间没有相对运动 -->
-    <!-- force和torque传感器测量的是disk和force_sensor_body之间的相互作用 -->
-    <weld name="force_sensor_weld" 
-          body1="panda_hand" 
-          body2="force_sensor_body"
-          relpose="0 0 0.05 1 0 0 0"
-          solref="0.02 1"
-          solimp="0.9 0.95 0.001" />
-  </equality>
 </mujoco>

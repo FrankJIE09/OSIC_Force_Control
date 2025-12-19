@@ -117,30 +117,18 @@ class WipeTableSimulation:
         force_raw = self.data.sensordata[self.sensor_id_force:self.sensor_id_force + 3]
         # torque传感器：3维力矩 [tx, ty, tz]（在force_sensor_site坐标系中）
         torque_raw = self.data.sensordata[self.sensor_id_torque:self.sensor_id_torque + 3]
-        
-        # 组合成6维wrench
-        wrench_raw = np.concatenate([force_raw, torque_raw])  # [fx, fy, fz, tx, ty, tz]
+        print(force_raw)
 
-        # 低通滤波: y_new = alpha * x_new + (1 - alpha) * y_old
-        self.filtered_wrench = self.force_alpha * wrench_raw + (1 - self.force_alpha) * self.filtered_wrench
+        # 组合成6维wrench
+        wrench_raw = np.concatenate([torque_raw,force_raw])  # [ tx, ty, tz,fx, fy, fz,]
 
         # 注意：force传感器测量的是从子体(disk)指向父体(force_sensor_body)的力
         # 对于接触力控制，我们需要的是从环境作用到disk的力（即disk受到的力）
         # 根据牛顿第三定律，disk受到的力 = -force传感器测量的力
         # 所以这里取负号
-        wrench = -self.filtered_wrench
+        wrench = -wrench_raw
 
         return wrench
-    
-    def get_filtered_contact_force(self):
-        """
-        获取滤波后的Z轴接触力（向后兼容）
-        
-        返回:
-            f_z: Z轴方向的力（标量）
-        """
-        wrench = self.get_filtered_contact_wrench()
-        return wrench[2]  # 返回Z轴方向的力
 
     def generate_wipe_trajectory(self, t):
         """生成擦拭轨迹"""
@@ -191,7 +179,7 @@ class WipeTableSimulation:
         # 3. 接触力检测与模式判断
         # 获取6维wrench
         wrench_curr = self.get_filtered_contact_wrench()
-        f_z_curr = wrench_curr[2]  # Z轴方向的力
+        f_z_curr = wrench_curr[5]  # Z轴方向的力
         is_contact = abs(f_z_curr) > 0.5  # 接触阈值 0.5N
 
         # 4. 生成轨迹
