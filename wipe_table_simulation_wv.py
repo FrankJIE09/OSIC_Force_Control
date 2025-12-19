@@ -40,21 +40,24 @@ class WipeTableSimulation:
         self.X_e_integral = np.zeros(6)
         self.F_e_integral = np.zeros(6)
 
-        # 力滤波变量
-        self.filtered_force = 0.0
+        # 力滤波变量（6维wrench）
+        self.filtered_wrench = np.zeros(6)  # [fx, fy, fz, tx, ty, tz]
         self.force_alpha = 0.1  # 低通滤波系数 (0~1, 越小越平滑)
 
         # 任务状态机
         self.start_time = 0.0
 
-        # 传感器初始化
+        # 传感器初始化：6维力/力矩传感器
         try:
-            self.sensor_id_disk = self.model.sensor("disk_force_magnitude").id
-            self.sensor_id_bottom = self.model.sensor("disk_bottom_force_magnitude").id
-            print("✓ 力传感器初始化成功")
+            self.sensor_id_force = self.model.sensor("force_sensor_force").id
+            self.sensor_id_torque = self.model.sensor("force_sensor_torque").id
+            print("✓ 6维力传感器初始化成功")
+            print(f"  Force传感器ID: {self.sensor_id_force}")
+            print(f"  Torque传感器ID: {self.sensor_id_torque}")
         except (AttributeError, KeyError) as e:
             print(f"⚠ 力传感器未找到: {e}")
-            self.sensor_id_disk = None
+            self.sensor_id_force = None
+            self.sensor_id_torque = None
 
     def setup_control_parameters(self):
         """设置控制增益"""
@@ -95,24 +98,49 @@ class WipeTableSimulation:
         except np.linalg.LinAlgError:
             return np.eye(6)
 
-    def get_filtered_contact_force(self):
-        """获取滤波后的接触力"""
-        if self.sensor_id_disk is None:
-            return 0.0
+    def get_filtered_contact_wrench(self):
+        """
+        获取滤波后的6维接触wrench（力和力矩）
+        
+        返回:
+            wrench: np.array([fx, fy, fz, tx, ty, tz])
+            - force传感器返回3维力 [fx, fy, fz]（在site坐标系中）
+            - torque传感器返回3维力矩 [tx, ty, tz]（在site坐标系中）
+            - 注意：force传感器测量的是从子体(disk)指向父体(force_sensor_body)的力
+            - 对于接触力，我们需要的是从环境作用到disk的力，所以需要取负号
+        """
+        if self.sensor_id_force is None or self.sensor_id_torque is None:
+            return np.zeros(6)
 
         # 读取原始数据
-        f_disk = self.data.sensordata[self.sensor_id_disk]
-        f_bottom = self.data.sensordata[self.sensor_id_bottom]
-        raw_force = f_disk + f_bottom
+        # force传感器：3维力 [fx, fy, fz]（在force_sensor_site坐标系中）
+        force_raw = self.data.sensordata[self.sensor_id_force:self.sensor_id_force + 3]
+        # torque传感器：3维力矩 [tx, ty, tz]（在force_sensor_site坐标系中）
+        torque_raw = self.data.sensordata[self.sensor_id_torque:self.sensor_id_torque + 3]
+        
+        # 组合成6维wrench
+        wrench_raw = np.concatenate([force_raw, torque_raw])  # [fx, fy, fz, tx, ty, tz]
 
         # 低通滤波: y_new = alpha * x_new + (1 - alpha) * y_old
-        self.filtered_force = self.force_alpha * raw_force + (1 - self.force_alpha) * self.filtered_force
+        self.filtered_wrench = self.force_alpha * wrench_raw + (1 - self.force_alpha) * self.filtered_wrench
 
-        # 转换为Z轴负方向压力 (假设传感器测量的是接触力大小，向下为压力)
-        # 如果力大于阈值，我们认为它主要来自Z轴的支撑
-        if self.filtered_force > 0.01:
-            return -self.filtered_force
-        return 0.0
+        # 注意：force传感器测量的是从子体(disk)指向父体(force_sensor_body)的力
+        # 对于接触力控制，我们需要的是从环境作用到disk的力（即disk受到的力）
+        # 根据牛顿第三定律，disk受到的力 = -force传感器测量的力
+        # 所以这里取负号
+        wrench = -self.filtered_wrench
+
+        return wrench
+    
+    def get_filtered_contact_force(self):
+        """
+        获取滤波后的Z轴接触力（向后兼容）
+        
+        返回:
+            f_z: Z轴方向的力（标量）
+        """
+        wrench = self.get_filtered_contact_wrench()
+        return wrench[2]  # 返回Z轴方向的力
 
     def generate_wipe_trajectory(self, t):
         """生成擦拭轨迹"""
@@ -161,7 +189,9 @@ class WipeTableSimulation:
         eta_s = self.dynamics_calc.compute_task_space_coriolis(q, V_s, 6)
 
         # 3. 接触力检测与模式判断
-        f_z_curr = self.get_filtered_contact_force()
+        # 获取6维wrench
+        wrench_curr = self.get_filtered_contact_wrench()
+        f_z_curr = wrench_curr[2]  # Z轴方向的力
         is_contact = abs(f_z_curr) > 0.5  # 接触阈值 0.5N
 
         # 4. 生成轨迹
@@ -195,12 +225,17 @@ class WipeTableSimulation:
         # 8. 力控制力 (Force Control)
         F_force = np.zeros(6)
         if enable_force_control:
+            # 期望wrench：仅Z轴有期望力
             F_d = np.zeros(6)
-            F_d[5] = self.F_desired_val  # 期望力 -15N
+            F_d[5] = self.F_desired_val  # 期望力 -15N（Z轴方向）
 
-            F_curr_vec = np.zeros(6)
-            F_curr_vec[5] = f_z_curr
+            # 当前测量的wrench（从传感器获取）
+            # 注意：wrench_curr是在force_sensor_site坐标系中的
+            # 如果force_sensor_site和panda_hand坐标系不同，需要转换
+            # 这里假设force_sensor_site和panda_hand坐标系相同
+            F_curr_vec = wrench_curr.copy()  # 使用完整的6维wrench
 
+            # 力误差
             F_e = F_d - F_curr_vec
             self.F_e_integral += F_e * dt
             # 力积分限幅
