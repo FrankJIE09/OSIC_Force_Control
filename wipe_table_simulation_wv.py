@@ -68,8 +68,8 @@ class WipeTableSimulation:
         self.K_i = np.diag([0.1, 0.1, 0.1, 10.0, 10.0, 10.0])
 
         # 力控制 PI 参数 [Tx, Ty, Tz, Fx, Fy, Fz]
-        self.K_fp = np.diag([0.0, 0.0, 0.0, 0.0, 0.0, 0.5])  # 仅 Z 轴有力控需求
-        self.K_fi = np.diag([0.0, 0.0, 0.0, 0.0, 0.0, 2.0])
+        self.K_fp = np.diag([0.5, 0.5, 0.5, 0.5, 0.5, 0.5])  # 仅 Z 轴有力控需求
+        self.K_fi = np.diag([2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
 
         self.F_desired_val = -15.0  # 期望压力 (N)
 
@@ -98,6 +98,35 @@ class WipeTableSimulation:
         except np.linalg.LinAlgError:
             return np.eye(6)
 
+    def compute_adjoint_transformation(self, R, p):
+        """
+        计算伴随变换矩阵 Ad，用于wrench的坐标变换
+        
+        参数:
+            R: 旋转矩阵 (3x3)，从源坐标系到目标坐标系的旋转
+            p: 位置向量 (3,)，源坐标系原点在目标坐标系中的位置
+        
+        返回:
+            Ad: 伴随变换矩阵 (6x6)
+        
+        Wrench变换公式: F_target = Ad^T @ F_source
+        其中 F = [tx, ty, tz, fx, fy, fz]^T (力矩在前，力在后)
+        """
+        # 计算位置向量的反对称矩阵 [p]×
+        p_skew = np.array([
+            [0, -p[2], p[1]],
+            [p[2], 0, -p[0]],
+            [-p[1], p[0], 0]
+        ])
+        
+        # 构建伴随变换矩阵
+        Ad = np.zeros((6, 6))
+        Ad[:3, :3] = R  # 力矩到力矩
+        Ad[3:, 3:] = R  # 力到力
+        Ad[3:, :3] = p_skew @ R  # 力矩对力的影响
+        
+        return Ad
+
     def get_filtered_contact_wrench(self):
         """
         获取滤波后的6维接触wrench（力和力矩）
@@ -116,11 +145,13 @@ class WipeTableSimulation:
         # force传感器：3维力 [fx, fy, fz]（在force_sensor_site坐标系中）
         force_raw = self.data.sensordata[self.sensor_id_force:self.sensor_id_force + 3]
         # torque传感器：3维力矩 [tx, ty, tz]（在force_sensor_site坐标系中）
-        torque_raw = self.data.sensordata[self.sensor_id_torque:self.sensor_id_torque + 3]
+        torque_raw = self.data.sensordata[self.sensor_id_torque * 3:self.sensor_id_torque * 3 + 3]
+        if abs(force_raw[2]) > 10:
+            print(torque_raw)
         print(force_raw)
 
         # 组合成6维wrench
-        wrench_raw = np.concatenate([torque_raw,force_raw])  # [ tx, ty, tz,fx, fy, fz,]
+        wrench_raw = np.concatenate([torque_raw, force_raw])  # [ tx, ty, tz,fx, fy, fz,]
 
         # 注意：force传感器测量的是从子体(disk)指向父体(force_sensor_body)的力
         # 对于接触力控制，我们需要的是从环境作用到disk的力（即disk受到的力）
@@ -136,7 +167,7 @@ class WipeTableSimulation:
         # 阶段 2: 保持XY，降低Z试图接触 (2-4秒)
         # 阶段 3: XY画圆，Z由力控接管 (4秒+)
 
-        center = np.array([0.5, 0.0])
+        center = np.array([0.55, 0.0])
         radius = 0.1
         freq = 1.0  # rad/s
 
@@ -145,7 +176,7 @@ class WipeTableSimulation:
         quat_d = np.array([quat_d[3], quat_d[0], quat_d[1], quat_d[2]])  # [w,x,y,z]
 
         if t < 2.0:
-            pos_d = np.array([0.5, 0.0, 0.3])
+            pos_d = np.array([0.55, 0.0, 0.3])
             mode = "APPROACH"
         elif t < 4.0:
             # 缓慢下降到表面高度附近
@@ -186,14 +217,18 @@ class WipeTableSimulation:
         pos_d, quat_d, mode = self.generate_wipe_trajectory(t)
 
         # 5. 定义约束矩阵 A_s
-        # 如果接触且处于 Descend 或 Wipe 阶段，开启 Z 轴力控
+        # 如果接触且处于 Descend 或 Wipe 阶段，开启力控
         enable_force_control = is_contact and (mode in ["DESCEND", "WIPE"])
 
-        A_s = np.zeros((1, 6))
         if enable_force_control:
-            # 约束方向：Z轴 (索引5)
-            # 此时 P_s 会将 Z 轴的运动控制移除
-            A_s[0, 5] = 1.0
+            # 约束方向：[wx, wy, wz, fz] (索引0,1,2,5)
+            # 在接触时，旋转方向(wx,wy,wz)和Z轴方向(fz)由力控接管
+            # 此时 P_s 会将这些方向上的运动控制移除
+            A_s = np.zeros((4, 6))
+            A_s[0, 0] = 1.0  # wx
+            A_s[1, 1] = 1.0  # wy
+            A_s[2, 2] = 1.0  # wz
+            A_s[3, 5] = 1.0  # fz
             P_s = self.compute_projection_matrix(Lambda_s, A_s)
         else:
             P_s = np.eye(6)
@@ -213,26 +248,52 @@ class WipeTableSimulation:
         # 8. 力控制力 (Force Control)
         F_force = np.zeros(6)
         if enable_force_control:
-            # 期望wrench：仅Z轴有期望力
-            F_d = np.zeros(6)
-            F_d[5] = self.F_desired_val  # 期望力 -15N（Z轴方向）
+            # 获取ft_sensor_site和panda_link0的世界坐标位姿
+            site_pos_world = np.array(self.data.site("ft_sensor_site").xpos)
+            site_mat_world = np.array(self.data.site("ft_sensor_site").xmat).reshape(3, 3)
 
-            # 当前测量的wrench（从传感器获取）
-            # 注意：wrench_curr是在force_sensor_site坐标系中的
-            # 如果force_sensor_site和panda_hand坐标系不同，需要转换
-            # 这里假设force_sensor_site和panda_hand坐标系相同
-            F_curr_vec = wrench_curr.copy()  # 使用完整的6维wrench
+            
+            # 构建SE(3)变换矩阵
+            T_world_to_site = np.eye(4)
+            T_world_to_site[:3, :3] = site_mat_world
+            T_world_to_site[:3, 3] = site_pos_world
+            
+ 
+            # 计算从site到base的SE(3)变换矩阵：T_site_to_base = T_world_to_base^(-1) @ T_world_to_site
+            T_world_to_site_inv = np.linalg.inv(T_world_to_site)
+            T_site_to_world = T_world_to_site_inv 
+            
+            # 从SE(3)变换矩阵提取旋转矩阵和位置向量
+            R_site_to_world = T_site_to_world[:3, :3]
+            p_site_in_world = T_site_to_world[:3, 3]
+            
+            # 计算伴随变换矩阵（从site到base）
+            Ad_site_to_world = self.compute_adjoint_transformation(R_site_to_world, p_site_in_world)
+            
+            # 期望wrench：[wx, wy, wz, fx, fy, fz]（在base坐标系中）
+            # 旋转方向(wx,wy,wz)期望力矩为0（保持当前姿态）
+            # Z轴方向(fz)期望力为-15N（向下压力）
+            F_d_base = np.zeros(6)
+            F_d_base[0] = 0.0  # 期望力矩 wx = 0
+            F_d_base[1] = 0.0  # 期望力矩 wy = 0
+            F_d_base[2] = 0.0  # 期望力矩 wz = 0
+            F_d_base[5] = self.F_desired_val  # 期望力 fz = -15N（Z轴方向）
 
-            # 力误差
-            F_e = F_d - F_curr_vec
-            self.F_e_integral += F_e * dt
+            # 当前测量的wrench（从传感器获取，在site坐标系中，转换到base坐标系）
+            F_curr_base = Ad_site_to_world.T @ wrench_curr
+
+            # 力误差（在base坐标系中）
+            F_e_base = F_d_base - F_curr_base
+            self.F_e_integral += F_e_base * dt
             # 力积分限幅
             self.F_e_integral = np.clip(self.F_e_integral, -50.0, 50.0)
 
-            # (I - P) * (F_d + Kp*Fe + Ki*IntFe)
-            # 在Z轴方向上，(I-P) 接近 1，所以这里实际上直接施加力指令
-            F_cmd = F_d + self.K_fp @ F_e + self.K_fi @ self.F_e_integral
-            F_force = (np.eye(6) - P_s) @ F_cmd
+            # 计算力控指令（在base坐标系中）
+            F_cmd_base = F_d_base + self.K_fp @ F_e_base + self.K_fi @ self.F_e_integral
+            
+            # (I - P) * F_cmd_base
+            # 在约束方向上(wx,wy,wz,fz)，(I-P)会将力控指令施加到这些方向
+            F_force = (np.eye(6) - P_s) @ F_cmd_base
 
         # 9. 合成力矩
         F_total = F_motion + F_force + eta_s
