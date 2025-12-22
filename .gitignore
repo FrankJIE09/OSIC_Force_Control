@@ -10,3 +10,14 @@
 # 排除 GIF 文件（如果不需要提交）
 *.gif
 
+# 排除 IDE 配置文件
+.idea/
+*.iml
+
+# 排除 Python 缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
