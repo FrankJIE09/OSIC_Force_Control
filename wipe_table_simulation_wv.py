@@ -39,6 +39,9 @@ class WipeTableSimulation:
         # 状态变量
         self.X_e_integral = np.zeros(6)
         self.F_e_integral = np.zeros(6)
+        
+        # 调试计数器
+        self.debug_counter = 0
 
         # 力滤波变量（6维wrench）
         self.filtered_wrench = np.zeros(6)  # [fx, fy, fz, tx, ty, tz]
@@ -83,7 +86,7 @@ class WipeTableSimulation:
 
         R_err = Rd @ Rc.T
         omega_e = Rotation.from_matrix(R_err).as_rotvec()
-        pos_e = p_d - p
+        pos_e = p_d - Rd @ Rc.T @ p
         return np.concatenate([omega_e, pos_e])
 
     def compute_projection_matrix(self, Lambda_s, A_s):
@@ -118,13 +121,13 @@ class WipeTableSimulation:
             [p[2], 0, -p[0]],
             [-p[1], p[0], 0]
         ])
-        
+
         # 构建伴随变换矩阵
         Ad = np.zeros((6, 6))
         Ad[:3, :3] = R  # 力矩到力矩
         Ad[3:, 3:] = R  # 力到力
         Ad[3:, :3] = p_skew @ R  # 力矩对力的影响
-        
+
         return Ad
 
     def get_filtered_contact_wrench(self):
@@ -146,9 +149,6 @@ class WipeTableSimulation:
         force_raw = self.data.sensordata[self.sensor_id_force:self.sensor_id_force + 3]
         # torque传感器：3维力矩 [tx, ty, tz]（在force_sensor_site坐标系中）
         torque_raw = self.data.sensordata[self.sensor_id_torque * 3:self.sensor_id_torque * 3 + 3]
-        if abs(force_raw[2]) > 10:
-            print(torque_raw)
-        print(force_raw)
 
         # 组合成6维wrench
         wrench_raw = np.concatenate([torque_raw, force_raw])  # [ tx, ty, tz,fx, fy, fz,]
@@ -168,7 +168,7 @@ class WipeTableSimulation:
         # 阶段 3: XY画圆，Z由力控接管 (4秒+)
 
         center = np.array([0.55, 0.0])
-        radius = 0.1
+        radius = 0.01
         freq = 1.0  # rad/s
 
         # 目标姿态：末端垂直向下
@@ -231,10 +231,17 @@ class WipeTableSimulation:
             A_s[3, 5] = 1.0  # fz
             P_s = self.compute_projection_matrix(Lambda_s, A_s)
         else:
+
             P_s = np.eye(6)
 
         # 6. 计算运动误差
         X_e = self.compute_spatial_error(pos, quat, pos_d, quat_d)
+        
+        # 调试：每循环5次打印空行
+        self.debug_counter += 1
+        if self.debug_counter % 30 == 0:
+            print()
+        
         V_e = -V_s
 
         # 积分限幅 (Anti-windup)
@@ -252,24 +259,22 @@ class WipeTableSimulation:
             site_pos_world = np.array(self.data.site("ft_sensor_site").xpos)
             site_mat_world = np.array(self.data.site("ft_sensor_site").xmat).reshape(3, 3)
 
-            
             # 构建SE(3)变换矩阵
             T_world_to_site = np.eye(4)
             T_world_to_site[:3, :3] = site_mat_world
             T_world_to_site[:3, 3] = site_pos_world
-            
- 
+
             # 计算从site到base的SE(3)变换矩阵：T_site_to_base = T_world_to_base^(-1) @ T_world_to_site
             T_world_to_site_inv = np.linalg.inv(T_world_to_site)
-            T_site_to_world = T_world_to_site_inv 
-            
+            T_site_to_world = T_world_to_site_inv
+
             # 从SE(3)变换矩阵提取旋转矩阵和位置向量
             R_site_to_world = T_site_to_world[:3, :3]
             p_site_in_world = T_site_to_world[:3, 3]
-            
+
             # 计算伴随变换矩阵（从site到base）
             Ad_site_to_world = self.compute_adjoint_transformation(R_site_to_world, p_site_in_world)
-            
+
             # 期望wrench：[wx, wy, wz, fx, fy, fz]（在base坐标系中）
             # 旋转方向(wx,wy,wz)期望力矩为0（保持当前姿态）
             # Z轴方向(fz)期望力为-15N（向下压力）
@@ -290,7 +295,7 @@ class WipeTableSimulation:
 
             # 计算力控指令（在base坐标系中）
             F_cmd_base = F_d_base + self.K_fp @ F_e_base + self.K_fi @ self.F_e_integral
-            
+
             # (I - P) * F_cmd_base
             # 在约束方向上(wx,wy,wz,fz)，(I-P)会将力控指令施加到这些方向
             F_force = (np.eye(6) - P_s) @ F_cmd_base
