@@ -1,123 +1,90 @@
-# OSIC 表面力控仿真 | Operational Space Impedance Control Force Simulation
+# 混合力位控制仿真 | Hybrid Force/Position Control Simulation
+
+## 🎬 演示视频
+
+**力位混合控制演示动画：**
+
+![力位混合控制演示](力位混合控制.gif)
+
+> 上方 GIF 展示了完整的仿真演示过程。如需查看高清视频，请打开 `力位混合控制.mkv`
+
+---
 
 ## 📋 项目简介
 
-基于MuJoCo物理引擎的**操作空间阻抗控制(OSIC)**表面力控仿真系统。实现Franka Panda机械臂在接触表面上的稳定法向力控制，并集成零空间优化和切向运动功能。
+基于 MuJoCo 物理引擎的**混合力位控制 (Hybrid Force/Position Control)** 表面力控制仿真系统。实现 Franka Panda 机械臂在接触表面上的稳定力控制，并完成圆形擦拭任务。
 
-**关键成果：**
-- ✅ 97% 接触率 - 60秒稳定接触维持
-- ✅ 零空间优化 - 关节配置自适应
-- ✅ 切向运动 - 前后左右光滑擦拭
-- ✅ 实时可视化 - MuJoCo Viewer 3D显示
+**核心功能：**
+- ✅ 混合力位控制 - 在空间坐标系中实现力位混合控制
+- ✅ 圆形擦拭任务 - XY 平面位置控制 + Z 轴力控制
+- ✅ 6维力/力矩传感器 - 实时测量接触 wrench
+- ✅ 投影矩阵控制 - 基于任务空间质量矩阵的投影控制
+- ✅ 实时可视化 - MuJoCo Viewer 3D 显示
 
 ---
 
 ## 🚀 快速开始
 
-### 快速启动菜单 (推荐)
-```bash
-python3 run.py
-```
-交互式菜单，选择要运行的版本
+### 环境要求
 
-### 1. **实时仿真显示** (推荐)
 ```bash
-python3 osic_viewer.py
+# 安装依赖
+pip install -r requirements.txt
 ```
-**功能：**
-- 打开MuJoCo 3D显示窗口
-- 实时渲染60秒完整仿真
-- 显示接触点和接触力矢量
+
+**依赖包：**
+- `mujoco >= 2.3.0` - 物理仿真引擎
+- `numpy >= 1.19` - 数值计算
+- `scipy` - 科学计算（用于旋转变换）
+
+### 运行仿真
+
+```bash
+# 运行主程序（实时可视化）
+python3 wipe_table_simulation_wv.py
+```
+
+**功能说明：**
+- 打开 MuJoCo 3D 显示窗口
+- 实时渲染机械臂运动
+- 显示接触力和接触状态
 - 关闭窗口自动停止
 
 **演示流程：**
 ```
-0-3s:    接近表面并接触 (Z轴快速下降)
-3-8s:    接触稳定期 (等待接触完全稳定)
-8-23s:   前后擦拭运动 ← 开始可见摇动！(X方向)
-23-43s:  左右擦拭运动 (Y方向)
-43-60s:  力控维持和收尾
+0-2s:    接近阶段 - 移动到工作表面上方
+2-4s:    下降阶段 - 缓慢下降到接触表面
+4s+:     擦拭阶段 - XY 平面画圆，Z 轴力控维持恒定压力
 ```
-
-### 2. **完整功能版本** (数据+可视化)
-```bash
-python3 osic_full_solution.py
-```
-**输出：**
-- `osic_with_tangential.csv` - 6001个数据点（60秒）
-- 终端实时统计信息
-
-### 3. **验证基础版本**
-```bash
-python3 osic_three_phase.py
-```
-**用途：** 验证三阶段力控基础功能
 
 ---
 
-## 📊 性能指标
-
-### 接触状态
-| 指标 | 数值 |
-|------|------|
-| 总接触率 | 97.0% |
-| 接触时长 | 59.01s |
-| 接触点数 | 5819 |
-
-### 力控性能
-| 指标 | 数值 |
-|------|------|
-| 平均法向力 | -5.71N |
-| 力标准差 | 2.54N |
-| 最大值 | 111.56N |
-| 最小值 | -7.27N |
-
-### 轨迹范围
-| 轴向 | 范围 | 跨度 |
-|------|------|------|
-| X | [0.3070, 0.5093]m | 0.2023m |
-| Y | [-0.0013, 0.0026]m | 0.0038m |
-| Z | [0.3865, 0.6175]m | 0.2310m |
-
----
-
-## 📁 文件结构
+## 📁 项目结构
 
 ```
 OSIC_Force_Control/
-├── osic_viewer.py              # ⭐ 主程序 (实时可视化)
-├── osic_full_solution.py       # 完整功能版本
-├── osic_three_phase.py         # 基础验证版本
+├── 力位混合控制.gif              # ⭐ 演示动画（GIF）
+├── 力位混合控制.mkv              # 演示视频（高清原版）
+├── wipe_table_simulation_wv.py   # ⭐ 主程序（混合力位控制）
+├── dynamics_calculator_wv.py      # 动力学计算器
 │
-├── surface_force_control.xml   # MuJoCo模型配置
-├── panda.xml                   # Franka Panda机器人模型
+├── surface_force_control_disk.xml # MuJoCo 模型配置（带圆盘）
+├── surface_force_control.xml      # MuJoCo 模型配置
+├── panda_with_disk.xml           # Franka Panda 机器人模型（带圆盘）
+├── panda.xml                     # Franka Panda 机器人模型
 │
-├── osic_visualization.png      # 9面板性能分析图
-├── osic_tangential_analysis.png # 6面板轨迹分析图
-├── osic_with_tangential.csv    # 完整仿真数据 (6001行)
+├── hybrid_force_position_control_spatial_frame.tex  # 理论文档
+├── wipe_table_simulation_wv_explanation.tex         # 代码说明文档
+├── force_error_coordinate_transformation.tex        # 坐标变换理论
+├── control_parameters_tuning_guide.tex              # 参数调优指南
 │
-└── README.md                   # 本文件
+├── mesh/                          # 3D 模型文件
+├── texture/                       # 纹理文件
+│
+├── requirements.txt               # Python 依赖
+├── environment.yml                # Conda 环境配置
+└── README.md                      # 本文件
 ```
-
----
-
-## ⚡ 最新改进 (擦拭运动优化)
-
-### 问题诊断
-原始版本的擦拭运动逻辑虽然代码正确，但接触不稳定导致无法激活。
-
-### 解决方案
-✅ **增强Z轴位置维持** (从2.0 → 8.0)  
-✅ **自适应XY增益** (接触时Kp=30, 接近时Kp=80)  
-✅ **延迟启动擦拭** (等待8秒稳定而非3秒)  
-✅ **优化接触灵敏度** (从>1.0N改为>0.5N)  
-
-### 效果
-修改后现在可以清晰看到：
-- **t=8-23秒:** 前后摇动 (X轴)
-- **t=23-43秒:** 左右摇摆 (Y轴)
-
-详见 `WIPE_MOTION_FIXED.md`
 
 ---
 
@@ -125,40 +92,82 @@ OSIC_Force_Control/
 
 ### 控制架构
 
-#### 三阶段法向力控制
-```
-阶段1 (0-1s):     位置锁定
-  - Kp = 150 (强刚度确保接触建立)
-  
-阶段2 (1-3s):     过渡下降  
-  - Kp = 40 (缓和下降速率)
-  - 目标深度: 0.313m
-  
-阶段3 (3s+):      力控维持
-  - Kp = 25 (力反馈控制)
-  - 目标力: 10N (可调整)
-  - 积分补偿: Ki = 0.3
+#### 混合力位控制原理
+
+本项目实现了基于**空间坐标系 (Spatial Frame)** 的混合力位控制：
+
+1. **投影矩阵计算**
+   ```
+   P_s = I - A_s^T (A_s Λ_s^{-1} A_s^T)^{-1} A_s Λ_s^{-1}
+   ```
+   - `A_s`: 约束矩阵，定义力控方向
+   - `Λ_s`: 任务空间质量矩阵
+   - `P_s`: 投影矩阵，将运动控制投影到非约束方向
+
+2. **运动控制力**
+   ```
+   F_motion = P_s Λ_s (K_p X_e + K_d V_e + K_i ∫X_e)
+   ```
+   - 在非约束方向上使用位置控制
+   - XY 平面：位置跟踪（画圆）
+   - 旋转方向：姿态保持
+
+3. **力控制力**
+   ```
+   F_force = (I - P_s) (F_d + K_fp F_e + K_fi ∫F_e)
+   ```
+   - 在约束方向上使用力控制
+   - Z 轴：维持恒定压力 (-30N)
+   - 旋转方向：保持零力矩
+
+4. **总控制力**
+   ```
+   F_total = F_motion + F_force + η_s
+   τ = J_s^T F_total
+   ```
+   - `η_s`: 科里奥利和离心力项
+   - `J_s`: 空间雅可比矩阵
+
+#### 控制参数
+
+**运动控制增益：**
+```python
+K_p = diag([20, 20, 20, 100, 100, 100]) * 5  # 位置/姿态比例增益
+K_d = diag([2, 2, 2, 10, 10, 10]) * 5        # 速度/角速度微分增益
+K_i = diag([0.1, 0.1, 0.1, 1.0, 1.0, 1.0])   # 积分增益
 ```
 
-#### XY轴跟踪控制
-```
-位置控制:   Kp = 25,  Kd = 5
-速度前馈:   Kv = 1.0 (切向运动用)
+**力控制增益：**
+```python
+K_fp = diag([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]) * 2  # 力比例增益
+K_fi = diag([0.01, 0.01, 0.01, 0.01, 0.01, 0.01])  # 力积分增益
+F_desired = -30.0  # 期望压力 (N)
 ```
 
-#### 零空间优化
+#### 约束矩阵定义
+
+在接触状态下，约束矩阵 `A_s` 定义为：
+```python
+A_s = [
+    [1, 0, 0, 0, 0, 0],  # wx 方向（力矩控制）
+    [0, 1, 0, 0, 0, 0],  # wy 方向（力矩控制）
+    [0, 0, 0, 0, 0, 0],  # wz 方向（自由）
+    [0, 0, 0, 0, 0, 1],  # fz 方向（力控制）
+]
 ```
-投影矩阵: N = I - J_pinv @ J
-目标配置: q_ref = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]
-增益:     κ = 0.05 (接触) / 0.1 (接近)
-```
+
+这意味着：
+- **wx, wy**: 力矩控制（保持零力矩）
+- **wz**: 自由旋转（位置控制）
+- **fx, fy**: 位置控制（XY 平面画圆）
+- **fz**: 力控制（维持恒定压力）
 
 ### 物理模型参数
 
 #### 机械臂
 - **型号:** Franka Panda (7-DOF)
-- **最大力矩:** [87, 87, 87, 87, 12, 12, 12] N·m
-- **初始配置:** [0, -π/4, 0, -3π/4, 0, π/2, π/4]
+- **最大力矩:** ±87 N·m (前4个关节), ±12 N·m (后3个关节)
+- **初始配置:** `[0, -0.785, 0, -2.356, 0, 1.571, 0.785]` rad
 
 #### 仿真环境
 - **时间步长:** 0.002s (500Hz)
@@ -168,103 +177,134 @@ OSIC_Force_Control/
 
 #### 接触表面
 - **几何:** 0.4m × 0.4m × 0.02m 盒子
-- **位置:** z = 0.3m
-- **摩擦系数:** [0.8, 0.02, 0.001] (normal, slide_x, slide_y)
-- **接触模型:** 软接触 (solimp="0.98 0.995 0.0001")
+- **位置:** z = 0.15m
+- **摩擦系数:** 0.8
+- **接触模型:** 软接触
 
 ---
 
-## 📈 仿真结果
+## 📊 关键特性
 
-### 接触力时间序列
-![接触力](osic_visualization.png)
+### ✅ 已实现功能
 
-**图表说明：** 9面板完整分析（使用英文标签，清晰无乱码，排版优化）
-- 左上：法向力随时间变化 (蓝线) + 接触状态 (绿色背景)
-- 中上：末端XYZ位置
-- 右上：XY平面运动轨迹（彩色表示时间）
-- 左中：XY轴独立分量变化
-- 中中：Z轴下降过程
-- 右中：接触状态时间序列（绿色=接触，红色=未接触）
-- 左下：接触力分布直方图
-- 中下：详细力曲线（与10N目标对比）
-- 右下：力误差分析
+1. **混合力位控制**
+   - 空间坐标系中的投影矩阵控制
+   - 运动控制和力控制的解耦
+   - 基于任务空间质量矩阵的动态补偿
 
-### 轨迹分析
-![轨迹](osic_tangential_analysis.png)
+2. **6维力/力矩传感器**
+   - 实时测量接触 wrench
+   - 传感器坐标系到世界坐标系的变换
+   - 低通滤波处理
 
-**包含内容：** 6面板详细轨迹分析（排版清晰，无文字重影）
-- 6个关键性能指标面板：法向力、接触状态、X/Y/Z位置、XY平面轨迹
-- 力分布直方图 (接近阶段 vs 接触阶段 vs 总体)
-- 彩色标记相位（橙色=接近，绿色=接触）
+3. **圆形擦拭轨迹**
+   - XY 平面圆形运动（半径 0.02m）
+   - Z 轴恒定压力控制（-30N）
+   - 平滑的轨迹生成
 
----
+4. **坐标变换**
+   - 伴随变换矩阵（Adjoint Transformation）
+   - Wrench 在不同坐标系间的转换
+   - 传感器数据到控制坐标系的映射
 
-## 🎯 功能特性
+5. **力矩限制与安全**
+   - 关节力矩限幅（±87 N·m）
+   - 超限报警机制
+   - 零空间阻尼稳定
 
-### ✅ 已实现
-1. **三阶段法向力控制** - 稳定接触建立与维持
-2. **零空间投影** - 关节配置优化 (N = I - J_pinv @ J)
-3. **切向运动控制** - 前后左右光滑擦拭运动
-4. **接触检测** - 实时法向力反馈
-5. **雅可比计算** - 末端执行器3×7雅可比矩阵
-6. **重力补偿** - 自动计算与抵消
-7. **力矩限制** - 安全范围内的关节力矩
-8. **实时可视化** - MuJoCo Viewer集成
-9. **可视化生成** - 支持PNG输出和数据导出
+6. **实时可视化**
+   - MuJoCo Viewer 集成
+   - 3D 机械臂模型显示
+   - 实时状态监控
 
 ### 🔮 未来改进方向
-- [ ] 增加切向力控制 (摩擦约束下的X/Y方向力)
-- [ ] 学习力控参数 (Kp, Kd 自适应调整)
-- [ ] 轨迹规划优化 (最小能量、最小时间)
-- [ ] 多工具支撑 (不同接触面积/材质)
-- [ ] 鲁棒性测试 (扰动、模型不确定性)
+
+- [ ] 自适应力控增益调整
+- [ ] 更复杂的擦拭轨迹（螺旋、8字形等）
+- [ ] 切向力控制（摩擦约束）
+- [ ] 多接触点支持
+- [ ] 参数自动调优
+- [ ] 数据记录与分析工具
 
 ---
 
-## 🔍 调试与修改
+## 📚 理论文档
 
-### 修改目标力
-编辑 `osic_viewer.py` 第 217 行：
-```python
-self.control_step(t, F_target=15.0)  # 改为15N
-```
+项目包含详细的理论文档（LaTeX 格式）：
 
-### 调整切向运动幅度
-编辑 `osic_viewer.py` 第 175-185 行：
-```python
-pos_ref_xy[0] += 0.12 * np.sin(...)  # X方向幅度改为12cm
-pos_ref_xy[1] -= 0.06 * np.sin(...)  # Y方向幅度改为6cm
-```
+1. **`hybrid_force_position_control_spatial_frame.tex`**
+   - 混合力位控制理论基础
+   - 投影矩阵推导
+   - 空间坐标系中的控制公式
 
-### 修改仿真时长
-编辑运行命令：
+2. **`wipe_table_simulation_wv_explanation.tex`**
+   - 代码实现详解
+   - 算法流程说明
+   - 关键参数解释
+
+3. **`force_error_coordinate_transformation.tex`**
+   - 力误差坐标变换
+   - 伴随变换矩阵理论
+   - Wrench 变换公式
+
+4. **`control_parameters_tuning_guide.tex`**
+   - 控制参数调优指南
+   - 稳定性分析
+   - 性能优化建议
+
+---
+
+## 🐛 常见问题
+
+### Q1: 运行时看不到窗口
+**A:** MuJoCo viewer 需要显示服务。如在 SSH 环境：
 ```bash
-# 改为30秒
-python3 -c "from osic_viewer import OSICViewer; sim = OSICViewer(); sim.run_with_viewer(duration=30.0)"
+# 使用 X11 转发
+ssh -X user@host
+python3 wipe_table_simulation_wv.py
 ```
 
-### 调整控制增益
-编辑 `osic_viewer.py` 的 `control_step()` 方法中的 Kp/Kd/Ki 参数
+### Q2: 接触力达不到期望值
+**A:** 调整以下参数：
+- 增加力控增益 `K_fp` 和 `K_fi`
+- 调整期望力 `F_desired_val`
+- 检查接触检测阈值
+
+### Q3: 运行报错 "No module named 'mujoco'"
+**A:** 安装 MuJoCo：
+```bash
+pip install mujoco
+```
+
+### Q4: 力矩超限警告
+**A:** 这是正常的保护机制。如果频繁出现：
+- 降低控制增益
+- 减小运动速度
+- 检查轨迹规划是否合理
 
 ---
 
-## 📊 数据格式
+## 📝 使用示例
 
-CSV文件列表 (`osic_with_tangential.csv`):
-```
-time, pos_x, pos_y, pos_z, force_normal, is_contact
-0.0, 0.307, -0.000, 0.590, 0.0, 0
-0.010, 0.307, 0.000, 0.590, 0.0, 0
-...
-60.0, 0.490, 0.001, 0.387, -5.71, 1
+### 修改期望力
+
+编辑 `wipe_table_simulation_wv.py` 第 83 行：
+```python
+self.F_desired_val = -30.0  # 改为其他值，如 -20.0
 ```
 
-**数据说明：**
-- `time`: 仿真时间 (秒)
-- `pos_x/y/z`: 末端执行器位置 (米)
-- `force_normal`: 法向接触力 (牛顿，负值表示压力)
-- `is_contact`: 接触状态 (0=否, 1=是)
+### 调整圆形轨迹
+
+编辑 `wipe_table_simulation_wv.py` 第 170-201 行的 `generate_wipe_trajectory` 方法：
+```python
+center = np.array([0.55, 0.0])  # 圆心位置
+radius = 0.02                    # 半径 (m)
+freq = 1.0                       # 角频率 (rad/s)
+```
+
+### 修改控制增益
+
+编辑 `wipe_table_simulation_wv.py` 的 `setup_control_parameters` 方法中的增益参数。
 
 ---
 
@@ -272,7 +312,9 @@ time, pos_x, pos_y, pos_z, force_normal, is_contact
 
 ### 依赖包
 ```bash
-pip install mujoco numpy
+numpy >= 1.19
+mujoco >= 2.3.0
+scipy
 ```
 
 ### 版本要求
@@ -283,91 +325,7 @@ pip install mujoco numpy
 ### 硬件要求
 - **CPU:** Intel/AMD 双核以上
 - **内存:** 4GB+
-- **显卡:** 可选 (集成GPU/独立显卡均支持)
-
----
-
-## 📝 使用示例
-
-### 示例1：快速验证
-```bash
-# 运行基础版本 (20秒快速测试)
-python3 osic_three_phase.py
-```
-
-### 示例2：完整仿真+数据保存
-```bash
-# 运行完整版本
-python3 osic_full_solution.py
-
-# 数据已保存到 osic_with_tangential.csv
-# 可用Python/Matlab进行后处理分析
-```
-
-### 示例3：实时3D可视化
-```bash
-# 主推荐用法 - 直观观看机械臂运动
-python3 osic_viewer.py
-
-# 窗口显示内容：
-# - 3D机械臂模型
-# - 接触点可视化
-# - 接触力矢量
-# - 实时约束跟踪
-```
-
----
-
-## 🐛 常见问题
-
-### Q1: 运行时看不到窗口
-**A:** MuJoCo viewer 需要显示服务 (X11/Wayland)。如在SSH环境：
-```bash
-# 方案1: 使用本地显示转发
-ssh -X user@host
-python3 osic_viewer.py
-
-# 方案2: 运行数据版本并生成图表
-python3 osic_full_solution.py
-python3 visualize_simple.py  # 需同目录有该脚本
-```
-
-### Q2: 接触力达不到10N
-**A:** 这是正常的。当前控制增益设计保证稳定性优先。如需提高目标力：
-1. 增加阶段2的下降深度 (0.313m 改为 0.310m)
-2. 提高力控增益 Kp (25 改为 30-35)
-3. 需要平衡稳定性和响应性
-
-### Q3: 运行报错 "No module named 'mujoco'"
-**A:** 安装MuJoCo：
-```bash
-pip install mujoco
-# 或指定版本
-pip install mujoco==2.3.0
-```
-
-### Q4: 仿真很卡/运行很慢
-**A:** 
-- 降低时间步长精度 (model.opt.timestep = 0.005)
-- 减少求解迭代次数 (model.opt.iterations = 25)
-- 使用更简单的求解器 (model.opt.solver = mjtSolver.mjSOL_PGS)
-
----
-
-## 📚 参考资料
-
-### 控制理论
-- **OSIC 基础:** Hogan, R. (1985). "Impedance Control: An Approach to Manipulation"
-- **零空间投影:** Maric, F. et al. "Nullspace Impedance Control"
-- **接触建模:** Colgate, J.E., Hogan, N. (1989). "Robust Control of Robotic Manipulators"
-
-### MuJoCo文档
-- 官方文档: https://mujoco.readthedocs.io/
-- GitHub: https://github.com/deepmind/mujoco
-
-### Franka Panda机械臂
-- 官方文档: https://frankaemika.github.io/
-- 技术参数: https://www.franka.de/
+- **显卡:** 可选（集成 GPU/独立显卡均支持）
 
 ---
 
@@ -376,64 +334,24 @@ pip install mujoco==2.3.0
 如遇到问题或有改进建议，欢迎反馈！
 
 **已知限制：**
-- 当前不支持Y轴大幅度摆动 (>0.04m 可能失稳)
-- 法向力目标设为10N，实际在-7~-6N范围
-- 目标可调整参数在源代码中
+- 当前实现针对圆形擦拭任务优化
+- 力控参数需要根据具体任务调整
+- 力矩限制为安全保护机制
 
 ---
 
 ## 📄 许可证
 
-本项目遵循MuJoCo开源许可。
+本项目遵循 MuJoCo 开源许可。
 
 ---
 
 ## 🙏 致谢
 
 基于开源项目：
-- MuJoCo - DeepMind Physics Engine
-- Franka Panda - Open Source Manipulation Platform
-
-**最后更新:** 2025年12月2日
+- **MuJoCo** - DeepMind Physics Engine
+- **Franka Panda** - Open Source Manipulation Platform
 
 ---
 
-## 📞 快速命令参考
-
-```bash
-# 交互式菜单 (推荐新手使用)
-python3 run.py
-
-# 实时仿真 3D显示
-python3 osic_viewer.py
-
-# 完整数据版本 (无可视化)
-python3 osic_full_solution.py
-
-# 基础验证 (快速测试)
-python3 osic_three_phase.py
-
-# 重新生成PNG图表 - 推荐使用英文标签（避免乱码）
-python3 generate_plots.py      # 9面板完整分析 (英文标签)
-python3 generate_plots.py --en # 9面板完整分析 (英文标签，显式指定)
-python3 generate_plots.py --cn # 9面板完整分析 (中文标签，需要系统安装中文字体)
-
-python3 generate_analysis.py      # 6面板轨迹分析 (英文标签)
-python3 generate_analysis.py --en # 6面板轨迹分析 (英文标签，显式指定)
-python3 generate_analysis.py --cn # 6面板轨迹分析 (中文标签，需要系统安装中文字体)
-```
-
-### 📌 中英文标签说明
-
-**为什么推荐使用英文标签？**
-- ✅ 所有系统都支持（无字体依赖）
-- ✅ 显示效果清晰（无乱码风险）
-- ✅ 国际协作友好
-- ✅ 默认设置
-
-**如何使用中文标签？**
-1. 确保系统已安装中文字体（如 SimHei/WenQuanYi）
-2. 运行 `python3 generate_plots.py --cn`
-3. 如果仍显示乱码，回到英文标签
-
-**祝你使用愉快！** 🚀
+**最后更新:** 2025年1月
