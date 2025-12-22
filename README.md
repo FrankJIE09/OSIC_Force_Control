@@ -108,10 +108,6 @@ OSIC_Force_Control/
 ├── panda_with_disk.xml           # Franka Panda 机器人模型（带圆盘）
 ├── panda.xml                     # Franka Panda 机器人模型
 │
-├── hybrid_force_position_control_spatial_frame.tex  # 理论文档
-├── wipe_table_simulation_wv_explanation.tex         # 代码说明文档
-├── force_error_coordinate_transformation.tex        # 坐标变换理论
-├── control_parameters_tuning_guide.tex              # 参数调优指南
 │
 ├── mesh/                          # 3D 模型文件
 ├── texture/                       # 纹理文件
