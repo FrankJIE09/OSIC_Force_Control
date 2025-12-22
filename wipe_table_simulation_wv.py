@@ -39,7 +39,7 @@ class WipeTableSimulation:
         # 状态变量
         self.X_e_integral = np.zeros(6)
         self.F_e_integral = np.zeros(6)
-        
+
         # 调试计数器
         self.debug_counter = 0
 
@@ -49,6 +49,12 @@ class WipeTableSimulation:
 
         # 任务状态机
         self.start_time = 0.0
+
+        # 力矩限制和报警
+        self.tau_max = 870.0  # 最大力矩限制 (N·m)
+        self.tau_min = -870.0  # 最小力矩限制 (N·m)
+        self.tau_warning_counter = 0  # 报警计数器，避免频繁打印
+        self.tau_warning_interval = 100  # 每N次超出才报警一次
 
         # 传感器初始化：6维力/力矩传感器
         try:
@@ -66,15 +72,15 @@ class WipeTableSimulation:
         """设置控制增益"""
         # 运动控制 PD 参数 [Rx, Ry, Rz, X, Y, Z]
         # 注意：Z轴增益在接触时会通过投影矩阵被屏蔽，但在非接触时需要保持悬停
-        self.K_p = np.diag([80.0, 80.0, 80.0, 400.0, 400.0, 400.0])
-        self.K_d = np.diag([5.0, 5.0, 5.0, 20.0, 20.0, 20.0])
-        self.K_i = np.diag([0.1, 0.1, 0.1, 10.0, 10.0, 10.0])
+        self.K_p = np.diag([20.0, 20.0, 20.0, 100.0, 100.0, 100.0])*1
+        self.K_d = np.diag([2.0, 2.0, 2.0, 10.0, 10.0, 10.0])*1
+        self.K_i = np.diag([0.1, 0.1, 0.1, 1.0, 1.0, 1.0])
 
         # 力控制 PI 参数 [Tx, Ty, Tz, Fx, Fy, Fz]
-        self.K_fp = np.diag([0.5, 0.5, 0.5, 0.5, 0.5, 0.5])  # 仅 Z 轴有力控需求
-        self.K_fi = np.diag([2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+        self.K_fp = np.diag([0.5, 0.5, 0.5, 0.5, 0.5, 0.5])*2  # 仅 Z 轴有力控需求
+        self.K_fi = np.diag([0.01, 0.01, 0.01, 0.01, 0.01, 0.01])
 
-        self.F_desired_val = -15.0  # 期望压力 (N)
+        self.F_desired_val = 30.0  # 期望压力 (N)
 
     def compute_spatial_error(self, p, q, p_d, q_d):
         """计算空间误差"""
@@ -211,7 +217,7 @@ class WipeTableSimulation:
         # 获取6维wrench
         wrench_curr = self.get_filtered_contact_wrench()
         f_z_curr = wrench_curr[5]  # Z轴方向的力
-        is_contact = abs(f_z_curr) > 0.5  # 接触阈值 0.5N
+        is_contact = abs(f_z_curr) > 10  # 接触阈值 0.5N
 
         # 4. 生成轨迹
         pos_d, quat_d, mode = self.generate_wipe_trajectory(t)
@@ -227,7 +233,7 @@ class WipeTableSimulation:
             A_s = np.zeros((4, 6))
             A_s[0, 0] = 1.0  # wx
             A_s[1, 1] = 1.0  # wy
-            A_s[2, 2] = 1.0  # wz
+            A_s[2, 2] = 0.0  # wz
             A_s[3, 5] = 1.0  # fz
             P_s = self.compute_projection_matrix(Lambda_s, A_s)
         else:
@@ -236,12 +242,12 @@ class WipeTableSimulation:
 
         # 6. 计算运动误差
         X_e = self.compute_spatial_error(pos, quat, pos_d, quat_d)
-        
+
         # 调试：每循环5次打印空行
         self.debug_counter += 1
-        if self.debug_counter % 30 == 0:
+        if self.debug_counter % 100 == 0:
             print()
-        
+
         V_e = -V_s
 
         # 积分限幅 (Anti-windup)
@@ -272,35 +278,40 @@ class WipeTableSimulation:
             R_site_to_world = T_site_to_world[:3, :3]
             p_site_in_world = T_site_to_world[:3, 3]
 
-            # 计算伴随变换矩阵（从site到base）
+            # 计算伴随变换矩阵（从site到world）
             Ad_site_to_world = self.compute_adjoint_transformation(R_site_to_world, p_site_in_world)
 
-            # 期望wrench：[wx, wy, wz, fx, fy, fz]（在base坐标系中）
+            # 期望wrench：[wx, wy, wz, fx, fy, fz]（在传感器坐标系site中定义）
             # 旋转方向(wx,wy,wz)期望力矩为0（保持当前姿态）
             # Z轴方向(fz)期望力为-15N（向下压力）
-            F_d_base = np.zeros(6)
-            F_d_base[0] = 0.0  # 期望力矩 wx = 0
-            F_d_base[1] = 0.0  # 期望力矩 wy = 0
-            F_d_base[2] = 0.0  # 期望力矩 wz = 0
-            F_d_base[5] = self.F_desired_val  # 期望力 fz = -15N（Z轴方向）
+            F_d_site = np.zeros(6)
+            F_d_site[0] = 0.0  # 期望力矩 wx = 0
+            F_d_site[1] = 0.0  # 期望力矩 wy = 0
+            F_d_site[2] = 0.0  # 期望力矩 wz = 0
+            F_d_site[5] = self.F_desired_val  # 期望力 fz = -15N（Z轴方向）
 
-            # 当前测量的wrench（从传感器获取，在site坐标系中，转换到base坐标系）
-            F_curr_base = Ad_site_to_world.T @ wrench_curr
+            # 计算力误差并转换到世界坐标系
+            # wrench_curr 和 F_d_site 都在传感器坐标系中，先计算误差再转换
+            F_e_world = Ad_site_to_world.T @ (F_d_site - wrench_curr*0.001)
 
-            # 力误差（在base坐标系中）
-            F_e_base = F_d_base - F_curr_base
-            self.F_e_integral += F_e_base * dt
+            # 力误差积分（在世界坐标系中）
+            self.F_e_integral += F_e_world * dt
             # 力积分限幅
             self.F_e_integral = np.clip(self.F_e_integral, -50.0, 50.0)
 
-            # 计算力控指令（在base坐标系中）
-            F_cmd_base = F_d_base + self.K_fp @ F_e_base + self.K_fi @ self.F_e_integral
+            # 计算力控指令（在世界坐标系中）
+            # 将期望力从传感器坐标系转换到世界坐标系，然后加上误差项
+            F_d_world = Ad_site_to_world.T @ F_d_site
+            F_cmd_world = F_d_world + self.K_fp @ F_e_world + self.K_fi @ self.F_e_integral
 
-            # (I - P) * F_cmd_base
+            # (I - P) * F_cmd_world
             # 在约束方向上(wx,wy,wz,fz)，(I-P)会将力控指令施加到这些方向
-            F_force = (np.eye(6) - P_s) @ F_cmd_base
+            # F_force 在世界坐标系中，与 F_motion 和 eta_s 保持一致
+            F_force = (np.eye(6) - P_s) @ F_cmd_world
 
         # 9. 合成力矩
+        # 所有力都在世界坐标系（spatial frame）中：F_motion, F_force, eta_s
+        # J_s 也是世界坐标系中的空间雅可比，所以可以直接相加并通过 J_s.T 映射到关节空间
         F_total = F_motion + F_force + eta_s
         tau = J_s.T @ F_total
 
@@ -308,8 +319,30 @@ class WipeTableSimulation:
         tau_null = -2.0 * qdot
         tau += (np.eye(7) - J_s.T @ np.linalg.pinv(J_s.T)) @ tau_null
 
-        # 10. 发送控制
-        tau = np.clip(tau, -87, 87)
+        # 10. 力矩限制和报警
+        tau_original = tau.copy()  # 保存原始力矩值用于报警
+        tau = np.clip(tau, self.tau_min, self.tau_max)
+        
+        # 检查是否超出限制并报警
+        exceeded_mask = (tau_original < self.tau_min) | (tau_original > self.tau_max)
+        if np.any(exceeded_mask):
+            self.tau_warning_counter += 1
+            if self.tau_warning_counter >= self.tau_warning_interval:
+                exceeded_joints = np.where(exceeded_mask)[0]
+                for joint_idx in exceeded_joints:
+                    joint_name = self.joint_names[joint_idx]
+                    tau_original_val = tau_original[joint_idx]
+                    tau_clipped_val = tau[joint_idx]
+                    if tau_original_val > self.tau_max:
+                        print(f"⚠️  力矩超限警告 [t={t:.2f}s]: 关节 {joint_name} (索引 {joint_idx}) "
+                              f"力矩 {tau_original_val:.2f} N·m 超出上限 {self.tau_max:.2f} N·m, "
+                              f"已限制为 {tau_clipped_val:.2f} N·m")
+                    elif tau_original_val < self.tau_min:
+                        print(f"⚠️  力矩超限警告 [t={t:.2f}s]: 关节 {joint_name} (索引 {joint_idx}) "
+                              f"力矩 {tau_original_val:.2f} N·m 超出下限 {self.tau_min:.2f} N·m, "
+                              f"已限制为 {tau_clipped_val:.2f} N·m")
+                self.tau_warning_counter = 0  # 重置计数器
+        
         self.data.ctrl[:] = tau
 
     def run(self):

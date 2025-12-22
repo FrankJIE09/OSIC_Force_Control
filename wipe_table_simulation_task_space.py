@@ -169,11 +169,11 @@ class TaskSpaceSimulation:
     def setup_control_parameters(self):
         # 空间控制增益
         # K_p [旋转, 位置] - 空间刚度
-        self.K_p = np.diag([100.0, 100.0, 100.0, 200.0, 200.0, 200.0])
+        self.K_p = np.diag([100.0, 100.0, 100.0, 2000.0, 2000.0, 2000.0])
         # K_i
         self.K_i = np.diag([0.1, 0.1, 0.1, 0.5, 0.5, 0.5])
         # K_d - 空间阻尼
-        self.K_d = np.diag([10.0, 10.0, 10.0, 50.0, 50.0, 50.0])
+        self.K_d = np.diag([10.0, 10.0, 10.0, 500.0, 500.0, 500.0])
 
     def get_spatial_jacobian(self):
         """
