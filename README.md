@@ -1,21 +1,37 @@
-# 混合力位控制仿真 | Hybrid Force/Position Control Simulation
+# 机器人控制仿真 | Robot Control Simulation
+
+本项目包含两种控制方法的实现：
+- **阻抗控制 (Impedance Control)** - 空间任务空间控制
+- **混合力位控制 (Hybrid Force/Position Control)** - 表面力控制与圆形擦拭任务
 
 ## 🎬 演示视频
 
-**力位混合控制演示动画：**
+### 阻抗控制演示
+
+![阻抗控制演示](阻抗控制.gif)
+
+> 上方 GIF 展示了阻抗控制（空间任务空间控制）的完整仿真演示过程。如需查看高清视频，请打开 `阻抗控制.mkv`
+
+### 混合力位控制演示
 
 ![力位混合控制演示](力位混合控制.gif)
 
-> 上方 GIF 展示了完整的仿真演示过程。如需查看高清视频，请打开 `力位混合控制.mkv`
+> 上方 GIF 展示了混合力位控制的完整仿真演示过程。如需查看高清视频，请打开 `力位混合控制.mkv`
 
 ---
 
 ## 📋 项目简介
 
-基于 MuJoCo 物理引擎的**混合力位控制 (Hybrid Force/Position Control)** 表面力控制仿真系统。实现 Franka Panda 机械臂在接触表面上的稳定力控制，并完成圆形擦拭任务。
+基于 MuJoCo 物理引擎的机器人控制仿真系统，实现了两种主要的控制方法：
 
-**核心功能：**
-- ✅ 混合力位控制 - 在空间坐标系中实现力位混合控制
+### 1. 阻抗控制 (Impedance Control)
+- ✅ 空间任务空间控制 (Spatial Task Space Control)
+- ✅ 所有计算（误差、雅可比、动力学）均在世界坐标系下进行
+- ✅ 空间速度控制和配置误差计算
+- ✅ 实时可视化与 ROS2 TF 发布支持
+
+### 2. 混合力位控制 (Hybrid Force/Position Control)
+- ✅ 在空间坐标系中实现力位混合控制
 - ✅ 圆形擦拭任务 - XY 平面位置控制 + Z 轴力控制
 - ✅ 6维力/力矩传感器 - 实时测量接触 wrench
 - ✅ 投影矩阵控制 - 基于任务空间质量矩阵的投影控制
@@ -39,9 +55,24 @@ pip install -r requirements.txt
 
 ### 运行仿真
 
+#### 1. 阻抗控制仿真
+
 ```bash
-# 运行主程序（实时可视化）
-python3 wipe_table_simulation_wv.py
+# 运行阻抗控制程序（实时可视化）
+python3 impedance_control_simulation.py
+```
+
+**功能说明：**
+- 打开 MuJoCo 3D 显示窗口
+- 实时渲染机械臂运动
+- 空间任务空间控制
+- 支持 ROS2 TF 发布（可选）
+
+#### 2. 混合力位控制仿真
+
+```bash
+# 运行混合力位控制程序（实时可视化）
+python3 hybrid_force_position_control_simulation.py
 ```
 
 **功能说明：**
@@ -63,10 +94,14 @@ python3 wipe_table_simulation_wv.py
 
 ```
 OSIC_Force_Control/
-├── 力位混合控制.gif              # ⭐ 演示动画（GIF）
-├── 力位混合控制.mkv              # 演示视频（高清原版）
-├── wipe_table_simulation_wv.py   # ⭐ 主程序（混合力位控制）
-├── dynamics_calculator_wv.py      # 动力学计算器
+├── 阻抗控制.gif                  # ⭐ 阻抗控制演示动画（GIF）
+├── 阻抗控制.mkv                  # 阻抗控制演示视频（高清原版）
+├── 力位混合控制.gif              # ⭐ 混合力位控制演示动画（GIF）
+├── 力位混合控制.mkv              # 混合力位控制演示视频（高清原版）
+│
+├── impedance_control_simulation.py              # ⭐ 阻抗控制主程序
+├── hybrid_force_position_control_simulation.py # ⭐ 混合力位控制主程序
+├── dynamics_calculator_wv.py                   # 动力学计算器
 │
 ├── surface_force_control_disk.xml # MuJoCo 模型配置（带圆盘）
 ├── surface_force_control.xml      # MuJoCo 模型配置
@@ -90,7 +125,43 @@ OSIC_Force_Control/
 
 ## 🔧 技术细节
 
-### 控制架构
+### 1. 阻抗控制 (Impedance Control)
+
+#### 控制架构
+
+阻抗控制实现了基于**空间坐标系 (Spatial Frame)** 的任务空间控制：
+
+**控制律：**
+```
+F_s = Λ_s(θ) d/dt(V_d) + K_p X_e + K_d V_e + η_s(θ, V_s)
+τ = J_s^T(θ) F_s
+```
+
+其中：
+- `V_s`: 当前空间速度 (Spatial Velocity)
+- `X_e = log(X_d X^{-1})`: 空间配置误差 (Spatial Twist)
+- `V_e = V_d - V_s`: 空间速度误差
+- `Λ_s, η_s`: 空间坐标系下的动力学矩阵
+- `J_s`: 空间雅可比矩阵
+
+**控制参数：**
+```python
+K_p = diag([100, 100, 100, 2000, 2000, 2000])  # 空间刚度
+K_d = diag([10, 10, 10, 500, 500, 500])        # 空间阻尼
+K_i = diag([0.1, 0.1, 0.1, 0.5, 0.5, 0.5])     # 积分增益
+```
+
+**特点：**
+- 所有计算在世界坐标系下进行
+- 使用空间雅可比矩阵 `J_s`
+- 支持前馈加速度控制
+- 可选的 ROS2 TF 发布功能
+
+---
+
+### 2. 混合力位控制 (Hybrid Force/Position Control)
+
+#### 控制架构
 
 #### 混合力位控制原理
 
@@ -187,32 +258,49 @@ A_s = [
 
 ### ✅ 已实现功能
 
-1. **混合力位控制**
+#### 阻抗控制功能
+
+1. **空间任务空间控制**
+   - 空间坐标系下的完整动力学计算
+   - 空间雅可比矩阵计算
+   - 空间配置误差和速度误差计算
+   - 前馈加速度控制
+
+2. **ROS2 集成**
+   - TF 变换发布（可选）
+   - 实时位姿和参考位姿广播
+   - 多线程安全设计
+
+#### 混合力位控制功能
+
+3. **混合力位控制**
    - 空间坐标系中的投影矩阵控制
    - 运动控制和力控制的解耦
    - 基于任务空间质量矩阵的动态补偿
 
-2. **6维力/力矩传感器**
+4. **6维力/力矩传感器**
    - 实时测量接触 wrench
    - 传感器坐标系到世界坐标系的变换
    - 低通滤波处理
 
-3. **圆形擦拭轨迹**
+5. **圆形擦拭轨迹**
    - XY 平面圆形运动（半径 0.02m）
    - Z 轴恒定压力控制（-30N）
    - 平滑的轨迹生成
 
-4. **坐标变换**
+6. **坐标变换**
    - 伴随变换矩阵（Adjoint Transformation）
    - Wrench 在不同坐标系间的转换
    - 传感器数据到控制坐标系的映射
 
-5. **力矩限制与安全**
+#### 通用功能
+
+7. **力矩限制与安全**
    - 关节力矩限幅（±87 N·m）
    - 超限报警机制
    - 零空间阻尼稳定
 
-6. **实时可视化**
+8. **实时可视化**
    - MuJoCo Viewer 集成
    - 3D 机械臂模型显示
    - 实时状态监控
@@ -261,7 +349,9 @@ A_s = [
 ```bash
 # 使用 X11 转发
 ssh -X user@host
-python3 wipe_table_simulation_wv.py
+python3 impedance_control_simulation.py
+# 或
+python3 hybrid_force_position_control_simulation.py
 ```
 
 ### Q2: 接触力达不到期望值
@@ -286,16 +376,24 @@ pip install mujoco
 
 ## 📝 使用示例
 
-### 修改期望力
+### 修改阻抗控制参数
 
-编辑 `wipe_table_simulation_wv.py` 第 83 行：
+编辑 `impedance_control_simulation.py` 的 `setup_control_parameters` 方法：
+```python
+self.K_p = np.diag([100.0, 100.0, 100.0, 2000.0, 2000.0, 2000.0])  # 空间刚度
+self.K_d = np.diag([10.0, 10.0, 10.0, 500.0, 500.0, 500.0])        # 空间阻尼
+```
+
+### 修改混合力位控制期望力
+
+编辑 `hybrid_force_position_control_simulation.py` 第 83 行：
 ```python
 self.F_desired_val = -30.0  # 改为其他值，如 -20.0
 ```
 
 ### 调整圆形轨迹
 
-编辑 `wipe_table_simulation_wv.py` 第 170-201 行的 `generate_wipe_trajectory` 方法：
+编辑 `hybrid_force_position_control_simulation.py` 第 170-201 行的 `generate_wipe_trajectory` 方法：
 ```python
 center = np.array([0.55, 0.0])  # 圆心位置
 radius = 0.02                    # 半径 (m)
@@ -304,7 +402,7 @@ freq = 1.0                       # 角频率 (rad/s)
 
 ### 修改控制增益
 
-编辑 `wipe_table_simulation_wv.py` 的 `setup_control_parameters` 方法中的增益参数。
+编辑对应程序的 `setup_control_parameters` 方法中的增益参数。
 
 ---
 
