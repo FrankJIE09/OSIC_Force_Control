@@ -51,8 +51,8 @@ class WipeTableSimulation:
         self.start_time = 0.0
 
         # 力矩限制和报警
-        self.tau_max = 870.0  # 最大力矩限制 (N·m)
-        self.tau_min = -870.0  # 最小力矩限制 (N·m)
+        self.tau_max = 87.0  # 最大力矩限制 (N·m)
+        self.tau_min = -87.0  # 最小力矩限制 (N·m)
         self.tau_warning_counter = 0  # 报警计数器，避免频繁打印
         self.tau_warning_interval = 100  # 每N次超出才报警一次
 
@@ -72,15 +72,15 @@ class WipeTableSimulation:
         """设置控制增益"""
         # 运动控制 PD 参数 [Rx, Ry, Rz, X, Y, Z]
         # 注意：Z轴增益在接触时会通过投影矩阵被屏蔽，但在非接触时需要保持悬停
-        self.K_p = np.diag([20.0, 20.0, 20.0, 100.0, 100.0, 100.0])*1
-        self.K_d = np.diag([2.0, 2.0, 2.0, 10.0, 10.0, 10.0])*1
+        self.K_p = np.diag([20.0, 20.0, 20.0, 100.0, 100.0, 100.0])*5
+        self.K_d = np.diag([2.0, 2.0, 2.0, 10.0, 10.0, 10.0])*5
         self.K_i = np.diag([0.1, 0.1, 0.1, 1.0, 1.0, 1.0])
 
         # 力控制 PI 参数 [Tx, Ty, Tz, Fx, Fy, Fz]
         self.K_fp = np.diag([0.5, 0.5, 0.5, 0.5, 0.5, 0.5])*2  # 仅 Z 轴有力控需求
         self.K_fi = np.diag([0.01, 0.01, 0.01, 0.01, 0.01, 0.01])
 
-        self.F_desired_val = 30.0  # 期望压力 (N)
+        self.F_desired_val = -30.0  # 期望压力 (N)
 
     def compute_spatial_error(self, p, q, p_d, q_d):
         """计算空间误差"""
@@ -174,7 +174,7 @@ class WipeTableSimulation:
         # 阶段 3: XY画圆，Z由力控接管 (4秒+)
 
         center = np.array([0.55, 0.0])
-        radius = 0.01
+        radius = 0.02
         freq = 1.0  # rad/s
 
         # 目标姿态：末端垂直向下
@@ -302,7 +302,7 @@ class WipeTableSimulation:
             # 计算力控指令（在世界坐标系中）
             # 将期望力从传感器坐标系转换到世界坐标系，然后加上误差项
             F_d_world = Ad_site_to_world.T @ F_d_site
-            F_cmd_world = F_d_world + self.K_fp @ F_e_world + self.K_fi @ self.F_e_integral
+            F_cmd_world = F_d_world - self.K_fp @ F_e_world - self.K_fi @ self.F_e_integral
 
             # (I - P) * F_cmd_world
             # 在约束方向上(wx,wy,wz,fz)，(I-P)会将力控指令施加到这些方向
